@@ -1,3 +1,5 @@
+[Adblock Plus 2.0]
+!
 @@||sdo.com
 @@|http://imgtube.net/themes/cloudimg/assets/js/jquery2.js
 ||cdn.popmyads.com^
