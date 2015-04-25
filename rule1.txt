@@ -9,8 +9,6 @@ tb/static-frs/hao123/
 ||ad.directrev.com^$popup
 |http://prpops.com/p/27ae/direct$popup
 ||prpops.com^$popup
-||go.ad2up.com^$popup
-||go.padsdel.com^$popup
 imgstudio.org##.downloadimg
 imagedecode.com##CENTER > *
 imgserve.net###accordion[role="tablist"] > *
