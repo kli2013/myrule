@@ -9,6 +9,11 @@ tb/static-frs/hao123/
 ||ad.directrev.com^$popup
 |http://prpops.com/p/27ae/direct$popup
 ||prpops.com^$popup
+||bdimg.share.baidu.com/static/js/*
+||tieba.baidu.com/tb/static-common/component/commonLogic/common/crosspage_msg_system/CrossPageSWF.swf?*
+||play.baidu.com/player/static/flash/fmp.swf
+||api.share.baidu.com
+|*monitor.jpg?xcode
 imgstudio.org##.downloadimg
 imagedecode.com##CENTER > *
 imgserve.net###accordion[role="tablist"] > *
@@ -38,11 +43,6 @@ file.rocks##.add
 nxsrv1.com##._GANa
 84zu.com##.DaKuang
 84zu.com###top_box
-||bdimg.share.baidu.com/static/js/*
-||tieba.baidu.com/tb/static-common/component/commonLogic/common/crosspage_msg_system/CrossPageSWF.swf?*
-||play.baidu.com/player/static/flash/fmp.swf
-||api.share.baidu.com
-|*monitor.jpg?xcode
 ipc.me##CENTER
 iqiyi.com##.leftShare
 bbs.kafan.cn##.aimg_tip
