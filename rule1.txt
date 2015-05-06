@@ -63,3 +63,11 @@ qidian.com###qdass_rectbox
 qidian.com###down_3g_20130621
 qidian.com##.top_game_info
 qidian.com##DIV.pop_box *
+privatehomeclips.com##.header_add
+privatehomeclips.com##.advertising
+privatehomeclips.com##.footer
+privatehomeclips.com##DIV[style="width:114px; height:315px;"]
+privatehomeclips.com###feedback-tab-link
+privatehomeclips.com##A[onclick="tClick()"] > *
+privatehomeclips.com##.under_pleyer_add
+privatehomeclips.com##.pl_1
