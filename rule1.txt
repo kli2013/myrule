@@ -1,4 +1,7 @@
 [Adblock Plus 2.0]
+! Title: Kli list
+! Homepage: https://github.com/kli2013/myrule
+!
 @@||sdo.com
 @@|http://imgtube.net/themes/cloudimg/assets/js/jquery2.js
 ||cdn.popmyads.com^
