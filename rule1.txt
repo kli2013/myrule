@@ -74,3 +74,6 @@ privatehomeclips.com###feedback-tab-link
 privatehomeclips.com##A[onclick="tClick()"] > *
 privatehomeclips.com##.under_pleyer_add
 privatehomeclips.com##.pl_1
+imgspice.com##TABLE[width="610"][height="260"][align="center"]
+8iyy.com###ampMsgDiv
+8iyy.com##IMG[width="960"]
