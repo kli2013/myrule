@@ -31,9 +31,11 @@ imgtiger.com###popupOverlay
 imgserve.net###popupOverlay
 imgdino.com###popupOverlay
 imageteam.org##CENTER *
-baqiushi.net##[style="overflow:hidden;width:;text-align:center;padding:0px"] *
-baqiushi.net##A[href="http://www.8158w.com"]
-baqiushi.net##FONT[size="+4"]
+babaqiushi.com##[style="overflow:hidden;width:;text-align:center;padding:0px"] *
+babaqiushi.com##A[href="http://www.8158w.com"]
+babaqiushi.com##FONT[size="+4"]
+babaqiushi.com###SideBar IMG
+babaqiushi.com##[width="380"]
 iqiyi.com##.focusOne-wrapper
 iqiyi.com###block-AZ > *
 mediad2.jp##HTML
@@ -56,8 +58,6 @@ nyaa.se##IMG[src*="nyaa.se/a"]
 spring4u.info##TD[align="center"][height="80"]
 bbs.soul-plus.org##.gonggao
 cool18.com###d_right_ad
-baqiushi.net###SideBar IMG
-baqiushi.net##[width="380"]
 qidian.com###head > .DH11 > .DH16
 qidian.com##[class*=gg0]
 qidian.com##[id*=ADClient]
