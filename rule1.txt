@@ -31,8 +31,8 @@ imgtiger.com###popupOverlay
 imgserve.net###popupOverlay
 imgdino.com###popupOverlay
 imageteam.org##CENTER *
-babaqiushi.com##[style="overflow:hidden;width:;text-align:center;padding:0px"] *
-babaqiushi.com##A[href="http://www.8158w.com"]
+babaqiushi.com##TR
+babaqiushi.com##[size="+3"]
 babaqiushi.com##FONT[size="+4"]
 babaqiushi.com###SideBar IMG
 babaqiushi.com##[width="380"]
