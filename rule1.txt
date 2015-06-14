@@ -63,7 +63,7 @@ qidian.com##[class*=gg0]
 qidian.com##[id*=ADClient]
 qidian.com##.game_info
 qidian.com###qdass_rectbox
-qidian.com###down_3g_20130621
+qidian.com##[id^="down_3g"]
 qidian.com##.top_game_info
 qidian.com##DIV.pop_box *
 privatehomeclips.com##.header_add
