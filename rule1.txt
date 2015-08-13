@@ -56,7 +56,7 @@ yinyuetai.com##.pc-push-container
 bbs.kafan.cn##[id*="forum_rules"]
 nyaa.se##IMG[src*="nyaa.se/a"]
 spring4u.info##TD[align="center"][height="80"]
-bbs.soul-plus.org##.gonggao
+bbs.north-plus.net##.gonggao
 cool18.com###d_right_ad
 qidian.com###head > .DH11 > .DH16
 qidian.com##[class*=gg0]
