@@ -77,3 +77,4 @@ privatehomeclips.com##.pl_1
 imgspice.com##TABLE[width="610"][height="260"][align="center"]
 8iyy.com###ampMsgDiv
 8iyy.com##IMG[width="960"]
+||widget.weibo.com/topics/topic_vote_base.php$domain=www.iqiyi.com
