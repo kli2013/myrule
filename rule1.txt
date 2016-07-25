@@ -66,6 +66,10 @@ qidian.com###qdass_rectbox
 qidian.com##[id^="down_3g"]
 qidian.com##.top_game_info
 qidian.com##DIV.pop_box *
+i.qidian.com###banner3
+i.qidian.com###banner2
+i.qidian.com###banner4
+i.qidian.com###arb-banner > *
 privatehomeclips.com##.header_add
 privatehomeclips.com##.advertising
 privatehomeclips.com##.footer
@@ -74,6 +78,30 @@ privatehomeclips.com###feedback-tab-link
 privatehomeclips.com##A[onclick="tClick()"] > *
 privatehomeclips.com##.under_pleyer_add
 privatehomeclips.com##.pl_1
+snsdlover.com###kc56
+imgspice.com##TABLE[width="610"][height="260"][align="center"]
+8iyy.com###ampMsgDiv *
+8iyy.com##IMG[width="960"]
+entry.baidu.com##.opentrue
+babaqiushi.com##TR
+babaqiushi.com##[size="+3"] > *
+xingqu.baidu.com##[class^="j_coup"]
+imgrock.net##IMG[width="200"][height="47"]
+cfake.com###noads
+qidian.com##[id^="down_3g"]
+baidu.com###m7d97a854
+bbs.kafan.cn###comeing_nv *
+read.qidian.com##.praise
+read.qidian.com##.qrRecWrap.cf
+read.qidian.com##.userPraiseBox
+read.qidian.com##.informBtn
+v.youku.com###downloadIkuDiv
+banners.ero-advertising.com##IMG[src="//data-eroadvertising.com/datanew/banners/42630/3681359.gif"]
+zhanqi.tv##.login-money.js-login-guide-1
+b.faloo.com###side
+wqs.jd.com###pcqrcodecont
+iqiyi.com##[href*="mall.iqiyi.com"]
+pinterest.com##.background.loaded
 imgspice.com##TABLE[width="610"][height="260"][align="center"]
 8iyy.com###ampMsgDiv
 8iyy.com##IMG[width="960"]
