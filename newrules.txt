@@ -1,1 +1,17 @@
-1
+[Adblock Plus 2.0]
+! Title: Kli list
+! Homepage: https://github.com/kli2013/myrule
+!
+
+.*www.cool18.com.*threadview.*##.show_content > p:nth-child(3)
+.*www.cool18.com.*threadview.*##body > table:nth-child(4) > tbody:nth-child(1) > tr:nth-child(1)
+.*www.cool18.com.*threadview.*##.show_content > table:nth-child(2)
+.*www.cool18.com.*threadview.*##CENTER + * div[style*="width"]
+.*www.cool18.com.*threadview.*##CENTER + * a[name="postfp"]
+.*www.cool18.com.*threadview.*##iframe[scrolling="NO"]
+.*www.cool18.com.*threadview.*##TD[valign="middle"]
+.*www.cool18.com.*threadview.*##DIV[align="center"]
+.*www.cool18.com.*threadview.*##TD[align="center"]
+.*www.cool18.com.*threadview.*##font[style*="FONT-SIZE: 40pt"]
+.*www.cool18.com.*threadview.*##font[size="9"]
+.*www.cool18.com.*threadview.*##font[color="E6E6DD"]
