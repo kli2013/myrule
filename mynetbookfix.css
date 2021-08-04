@@ -1,0 +1,44 @@
+/* ==UserStyle==
+@name        小说网站个人习惯修正
+@namespace   https://github.com/kli2013
+@version     1.0.0 
+@updateURL   https://raw.githubusercontent.com/StylishThemes/Quora-Dark/master/quora-dark.user.css
+@license
+@author     kli
+==/UserStyle== */
+
+@-moz-document domain("xs123.net"), domain("biquxs520.com"), domain("biqupao.com"), domain("xbiquge.la"), domain("miaojiang8.net"), domain("biduoxs.com") {
+/*正文外框*/
+.content_read {
+    min-width: 1285px !important;
+}
+/*正文内框*/
+.box_con {
+    min-width: 1280px !important;
+}
+/*正文字号*/
+#content {
+    font-size: 26px !important;
+}
+}
+
+@-moz-document domain("shuquge.com") {
+/*正文外框*/
+.reader.book {
+    min-width: 1285px !important;
+}
+/*正文内框*/
+.content {
+    min-width: 1280px !important;
+}
+/*正文字号*/
+.showtxt {
+    font-size: 26px !important;
+}
+}
+
+@-moz-document domain("lingdianzww.com") {
+body > .wrap {
+    min-width: 1285px !important;
+}
+}
