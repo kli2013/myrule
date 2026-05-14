@@ -1,4 +1,4 @@
-name: Nuitka自动打包pyw为exe
+name: PyInstaller自动打包pyw为exe
 
 on:
   push:
@@ -18,36 +18,27 @@ jobs:
         python-version: '3.x'
         architecture: 'x64'
 
-    # 3. 安装项目依赖（如果你的脚本用到了第三方库，比如 requests、PyQt5 等）
+    # 3. 安装 PyInstaller 和项目依赖
     - name: Install Dependencies
       run: |
-        pip install nuitka  # 安装 Nuitka
+        python -m pip install --upgrade pip
+        pip install pyinstaller
         pip install tkinterdnd2
 
-    # 4. 使用官方 Nuitka-Action 进行打包
-    - name: Build with Nuitka
-      uses: Nuitka/Nuitka-Action@main
-      with:
-        nuitka-version: main
-        # ⚠️ 修改点1：填写你的子文件夹脚本路径
-        script-name: python/FFmpeg简易转换合并.pyw
-        
-        # 打包成单个 exe 文件
-        mode: onefile
-        
-        # ⚠️ 修改点2：指定打包后的 exe 名字
-        output-filename: FFmpeg简易转换合并
-        
-        # ⚠️ 修改点3：.pyw 脚本必备，禁用黑色控制台窗口
-        windows-console-mode: disable
-        include-data-file: python/ffmpeg_presets.json=./ffmpeg_presets.json
-        # 如果你的脚本用了 Tkinter/CustomTkinter 等 GUI 库，可以开启对应插件
-        # enable-plugins: tk-inter
+    # 4. 使用 PyInstaller 进行打包
+    - name: Build with PyInstaller
+      run: |
+        # -F (--onefile) 打包成单个exe
+        # -w (--windowed) 禁用黑色控制台窗口（适配.pyw）
+        # --name 指定生成的exe名字
+        # --add-data 添加外部数据文件（Windows下格式为 源路径;目标路径）
+        # 最后跟上你的主脚本路径
+        pyinstaller -F -w --name "FFmpeg简易转换合并" --add-data "python/ffmpeg_presets.json;." python/FFmpeg简易转换合并.pyw
 
     # 5. 上传打包好的 exe 文件
     - name: Upload artifact
       uses: actions/upload-artifact@v4
       with:
-        name: Nuitka-Windows-Build
-        # Nuitka 打包后的文件默认在 build 目录下
-        path: build/FFmpeg简易转换合并.exe
+        name: PyInstaller-Windows-Build
+        # PyInstaller 打包后的文件默认在 dist 目录下
+        path: dist/FFmpeg简易转换合并.exe
