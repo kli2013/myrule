@@ -1,0 +1,53 @@
+name: Nuitka自动打包pyw为exe
+
+on:
+  push:
+    branches: [ main, master ]
+
+jobs:
+  build-windows:
+    runs-on: windows-latest
+    steps:
+    # 1. 拉取你的仓库代码
+    - uses: actions/checkout@v4
+
+    # 2. 设置 Python 环境
+    - name: Set up Python
+      uses: actions/setup-python@v5
+      with:
+        python-version: '3.x'
+        architecture: 'x64'
+
+    # 3. 安装项目依赖（如果你的脚本用到了第三方库，比如 requests、PyQt5 等）
+    - name: Install Dependencies
+      run: |
+        pip install nuitka  # 安装 Nuitka
+        pip install tkinterdnd2
+
+    # 4. 使用官方 Nuitka-Action 进行打包
+    - name: Build with Nuitka
+      uses: Nuitka/Nuitka-Action@main
+      with:
+        nuitka-version: main
+        # ⚠️ 修改点1：填写你的子文件夹脚本路径
+        script-name: python/FFmpeg简易转换合并.pyw
+        
+        # 打包成单个 exe 文件
+        mode: onefile
+        
+        # ⚠️ 修改点2：指定打包后的 exe 名字
+        output-filename: FFmpeg简易转换合并
+        
+        # ⚠️ 修改点3：.pyw 脚本必备，禁用黑色控制台窗口
+        windows-console-mode: disable
+        include-data-file: ./ffmpeg_presets.json=./ffmpeg_presets.json
+        # 如果你的脚本用了 Tkinter/CustomTkinter 等 GUI 库，可以开启对应插件
+        # enable-plugins: tk-inter
+
+    # 5. 上传打包好的 exe 文件
+    - name: Upload artifact
+      uses: actions/upload-artifact@v4
+      with:
+        name: Nuitka-Windows-Build
+        # Nuitka 打包后的文件默认在 build 目录下
+        path: build/FFmpeg简易转换合并.exe
