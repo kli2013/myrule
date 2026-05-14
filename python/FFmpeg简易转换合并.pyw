@@ -13,7 +13,7 @@ import sys
 import shutil
 import concurrent.futures
 
-# --- 优化：自动检测拖拽依赖，缺失时仅提示而不退出 ---
+# --- 优化：自动检测拖拽依赖，缺失时仅提示而不退出 --
 try:
     from tkinterdnd2 import TkinterDnD, DND_FILES
     DND_AVAILABLE = True  # 标记拖拽库可用
