@@ -49,6 +49,32 @@ def find_executable(name):
 PRESET_FILE = "ffmpeg_presets.json"
 CUSTOM_PRESET_PATH = None       # None 用上面的本地目录json，硬编码d:\123.json 就用具体路径
 
+# 2. 你的智能路径处理逻辑
+if getattr(sys, 'frozen', False):
+    BUNDLE_DIR = os.path.dirname(sys.executable)
+else:
+    BUNDLE_DIR = os.path.dirname(os.path.abspath(__file__))
+
+APP_NAME = "FFLiteGUI"
+USER_DATA_DIR = os.path.join(os.path.expanduser("~"), f".{APP_NAME}")
+os.makedirs(USER_DATA_DIR, exist_ok=True)
+
+if CUSTOM_PRESET_PATH:
+    FINAL_PRESET_PATH = CUSTOM_PRESET_PATH
+else:
+    FINAL_PRESET_PATH = os.path.join(USER_DATA_DIR, PRESET_FILE)
+
+# 释放默认配置（如果用户目录下还没有）
+bundled_default_config = os.path.join(BUNDLE_DIR, PRESET_FILE)
+if not os.path.exists(FINAL_PRESET_PATH) and os.path.exists(bundled_default_config):
+    try:
+        shutil.copy2(bundled_default_config, FINAL_PRESET_PATH)
+        print(f"首次运行，已从内部释放默认配置到：{FINAL_PRESET_PATH}")
+    except Exception as e:
+        print(f"释放配置文件失败: {e}")
+
+
+
 # ================== FFmpeg 编码器选项 ==================
 ALL_VIDEO_ENCODERS = [
     "libx264", "libx265", "libvpx-vp9", "libsvtav1", "mpeg4", "libxvid", "libtheora",
@@ -865,26 +891,12 @@ class FFmpegBatchGUI:
 
         #============核心程序检查============
         self.show_quick_warning()
-        
-    def get_script_dir():
-        """获取脚本所在的目录（支持打包后的 exe）"""
-        if getattr(sys, 'frozen', False):
-            return os.path.dirname(sys.executable)
-        else:
-            return os.path.dirname(os.path.abspath(__file__))
-    
-    def check_ffmpeg_in_local_dir(executable_name):
-        """优先在脚本目录下查找指定的可执行文件"""
-        local_path = os.path.join(get_script_dir(), executable_name)
-        if os.path.isfile(local_path) and os.access(local_path, os.X_OK):
-            return local_path
-        return None
-    
+
     def check_ffmpeg_dependencies(self):
         """检查 ffmpeg, ffplay, ffprobe 是否存在（优先本地目录，再查 PATH）"""
-        ffmpeg = check_ffmpeg_in_local_dir("ffmpeg.exe") or shutil.which("ffmpeg")
-        ffplay = check_ffmpeg_in_local_dir("ffplay.exe") or shutil.which("ffplay")
-        ffprobe = check_ffmpeg_in_local_dir("ffprobe.exe") or shutil.which("ffprobe")
+        ffmpeg = find_executable("ffmpeg.exe") or shutil.which("ffmpeg")
+        ffplay = find_executable("ffplay.exe") or shutil.which("ffplay")
+        ffprobe = find_executable("ffprobe.exe") or shutil.which("ffprobe")
         return ffmpeg, ffplay, ffprobe
 
     def show_quick_warning(self):
@@ -905,6 +917,15 @@ class FFmpegBatchGUI:
             self.append_info("解压后，将 bin 文件夹内的三个 exe 文件复制到本脚本目录，或添加 bin 路径到 Path。")
             self.append_info("提示：您可以在此日志框中直接选中上面的链接文字，右键复制。")
     #============核心程序检查结束============
+
+
+    def center_window(self, win, width, height):
+        """将 Toplevel 窗口居中显示"""
+        screen_width = win.winfo_screenwidth()
+        screen_height = win.winfo_screenheight()
+        x = (screen_width - width) // 2
+        y = (screen_height - height) // 2
+        win.geometry(f"{width}x{height}+{x}+{y}")
 
     # ---------- 辅助方法 ----------
     def normalize_path(self, path):
@@ -1536,17 +1557,14 @@ class FFmpegBatchGUI:
 
     # ---------- 预设管理 ----------
     def get_preset_path(self):
-        if CUSTOM_PRESET_PATH is not None:
-            return CUSTOM_PRESET_PATH
-        else:
-            return os.path.join(os.path.dirname(os.path.abspath(__file__)), PRESET_FILE)
+        return FINAL_PRESET_PATH   # 直接使用全局变量
 
     def load_preset_list(self):
-        preset_file = self.get_preset_path()
+        FINAL_PRESET_PATH = self.get_preset_path()
         presets = {}
-        if os.path.exists(preset_file):
+        if os.path.exists(FINAL_PRESET_PATH):
             try:
-                with open(preset_file, 'r', encoding='utf-8') as f:
+                with open(FINAL_PRESET_PATH, 'r', encoding='utf-8') as f:
                     presets = json.load(f)
             except: pass
         self.preset_combo['values'] = list(presets.keys())
@@ -1555,24 +1573,24 @@ class FFmpegBatchGUI:
         preset_name = simpledialog.askstring("保存预设", "请输入预设名称:", parent=self.root)
         if not preset_name: return
         preset_settings = self.get_current_settings()
-        preset_file = self.get_preset_path()
+        FINAL_PRESET_PATH = self.get_preset_path()
         presets = {}
-        if os.path.exists(preset_file):
+        if os.path.exists(FINAL_PRESET_PATH):
             try:
-                with open(preset_file, 'r', encoding='utf-8') as f:
+                with open(FINAL_PRESET_PATH, 'r', encoding='utf-8') as f:
                     presets = json.load(f)
             except: pass
         presets[preset_name] = preset_settings
-        with open(preset_file, 'w', encoding='utf-8') as f:
+        with open(FINAL_PRESET_PATH, 'w', encoding='utf-8') as f:
             json.dump(presets, f, indent=4, ensure_ascii=False)
         self.load_preset_list()
-        messagebox.showinfo("成功", f"预设“{preset_name}”已保存到:\n{preset_file}")
+        messagebox.showinfo("成功", f"预设“{preset_name}”已保存到:\n{FINAL_PRESET_PATH}")
 
     def load_preset(self, preset_name):
         if not preset_name: return
-        preset_file = self.get_preset_path()
-        if not os.path.exists(preset_file): return
-        with open(preset_file, 'r', encoding='utf-8') as f:
+        FINAL_PRESET_PATH = self.get_preset_path()
+        if not os.path.exists(FINAL_PRESET_PATH): return
+        with open(FINAL_PRESET_PATH, 'r', encoding='utf-8') as f:
             presets = json.load(f)
         if preset_name not in presets: return
         self.load_settings_into_ui(presets[preset_name])
@@ -1585,13 +1603,13 @@ class FFmpegBatchGUI:
             return
         if not messagebox.askyesno("确认删除", f"确定要删除预设“{preset_name}”吗？"):
             return
-        preset_file = self.get_preset_path()
-        if not os.path.exists(preset_file): return
-        with open(preset_file, 'r', encoding='utf-8') as f:
+        FINAL_PRESET_PATH = self.get_preset_path()
+        if not os.path.exists(FINAL_PRESET_PATH): return
+        with open(FINAL_PRESET_PATH, 'r', encoding='utf-8') as f:
             presets = json.load(f)
         if preset_name in presets:
             del presets[preset_name]
-            with open(preset_file, 'w', encoding='utf-8') as f:
+            with open(FINAL_PRESET_PATH, 'w', encoding='utf-8') as f:
                 json.dump(presets, f, indent=4, ensure_ascii=False)
             self.load_preset_list()
             self.preset_name.set("")
@@ -2022,11 +2040,11 @@ class FFmpegBatchGUI:
     #---导出预设
     def export_all_presets(self):
         """导出整个预设库到外部 JSON 文件（备份）"""
-        preset_file = self.get_preset_path()
-        if not os.path.exists(preset_file):
+        FINAL_PRESET_PATH = self.get_preset_path()
+        if not os.path.exists(FINAL_PRESET_PATH):
             # 如果预设文件不存在，可以创建一个空预设文件再导出
             if messagebox.askyesno("提示", "当前没有预设文件，是否创建一个空的预设文件并导出？"):
-                with open(preset_file, 'w', encoding='utf-8') as f:
+                with open(FINAL_PRESET_PATH, 'w', encoding='utf-8') as f:
                     json.dump({}, f, indent=4)
             else:
                 return
@@ -2041,7 +2059,7 @@ class FFmpegBatchGUI:
             return
     
         try:
-            shutil.copy2(preset_file, save_path)
+            shutil.copy2(FINAL_PRESET_PATH, save_path)
             self.append_info(f"✅ 全部预设已备份到: {save_path}")
             messagebox.showinfo("导出成功", f"预设库已导出至:\n{save_path}")
         except Exception as e:
@@ -2069,11 +2087,11 @@ class FFmpegBatchGUI:
             return
     
         # 读取当前预设库
-        preset_file = self.get_preset_path()
+        FINAL_PRESET_PATH = self.get_preset_path()
         current_presets = {}
-        if os.path.exists(preset_file):
+        if os.path.exists(FINAL_PRESET_PATH):
             try:
-                with open(preset_file, 'r', encoding='utf-8') as f:
+                with open(FINAL_PRESET_PATH, 'r', encoding='utf-8') as f:
                     current_presets = json.load(f)
             except:
                 pass
@@ -2102,7 +2120,7 @@ class FFmpegBatchGUI:
     
         # 保存到预设文件
         try:
-            with open(preset_file, 'w', encoding='utf-8') as f:
+            with open(FINAL_PRESET_PATH, 'w', encoding='utf-8') as f:
                 json.dump(new_presets, f, indent=4, ensure_ascii=False)
             self.load_preset_list()   # 刷新下拉列表
             self.append_info(f"✅ 预设库已更新，共 {len(new_presets)} 个预设")
@@ -2323,7 +2341,29 @@ class FFmpegBatchGUI:
         output_norm = normalize_win_path(output)
     
         cmd = [self.ffmpeg_cmd, "-y", "-fflags", "+genpts"]
+        
+        # 为每个输入文件确定是否需要添加截取参数
+        # 遍历所有启用的视频轨道，收集每个文件的截取设置（以一个文件一个为准，如有冲突取第一个）
+        file_trim = {}  # key: 文件路径, value: (start, end)
+        for track in enabled_tracks:
+            if track.type == "video":
+                # 从 enc_settings 中读取截取设置
+                trim_enabled = track.enc_settings.get("trim_enabled", False)
+                if trim_enabled:
+                    start = track.enc_settings.get("trim_start", "").strip()
+                    end = track.enc_settings.get("trim_end", "").strip()
+                    if start or end:
+                        # 如果同一个文件有多个视频轨道（罕见），后添加的会覆盖前面的，这里简单处理
+                        file_trim[track.file_path] = (start, end)
+        
+        # 添加输入文件，同时为需要截取的文件在 -i 前加上 -ss 和 -to
         for f in input_files_norm:
+            if f in file_trim:
+                start, end = file_trim[f]
+                if start:
+                    cmd.extend(["-ss", start])
+                if end:
+                    cmd.extend(["-to", end])
             cmd.extend(["-i", f])
     
         # 分离轨道
@@ -2359,8 +2399,8 @@ class FFmpegBatchGUI:
                 ph = main_video.pad_height.strip()
                 ox = main_video.offset_x.strip() if main_video.offset_x else "0"
                 oy = main_video.offset_y.strip() if main_video.offset_y else "0"
-                filter_parts.append(f"nullsrc=size={pw}x{ph}:duration=1 [canvas]")
-                filter_parts.append(f"[canvas][{current_v}]overlay={ox}:{oy}[v_main_pad]")
+                filter_parts.append(f"nullsrc=size={pw}x{ph}[canvas]")
+                filter_parts.append(f"[canvas][{current_v}]overlay={ox}:{oy}:shortest=1[v_main_pad]")
                 current_v = "v_main_pad"
 
             # 依次叠加从视频
@@ -2573,8 +2613,9 @@ class FFmpegBatchGUI:
         if settings.get("hflip", False):
             filters.append("hflip")
         # 反交错
-        if settings.get("deinterlace", False):
-            filters.append("yadif")
+        deint = settings.get("deinterlace_filter", "none")
+        if deint != "none":
+            filters.append(deint)
         # 注意：像素格式一般不在这里设置，避免影响叠加，由编码参数中的 -pix_fmt 控制
         return ",".join(filters) if filters else "null"
 
@@ -3003,7 +3044,8 @@ class FFmpegBatchGUI:
         track = self.merge_tracks[track_idx]
         win = tk.Toplevel(self.root)
         win.title(f"视频轨道设置 - {track.codec}")
-        win.geometry("750x700")
+        # 先设置窗口大小，再居中
+        self.center_window(win, 1000, 300)
         win.transient(self.root)
         win.grab_set()
 
@@ -3142,7 +3184,7 @@ class FFmpegBatchGUI:
         track = self.merge_tracks[track_idx]
         win = tk.Toplevel(self.root)
         win.title(f"音频轨道编码设置 - {track.codec}")
-        win.geometry("400x200")
+        self.center_window(win, 400, 200)
         win.transient(self.root)
         win.grab_set()
         ttk.Label(win, text="编码器:").grid(row=0, column=0, sticky="w", padx=5, pady=5)
@@ -3166,7 +3208,7 @@ class FFmpegBatchGUI:
         track = self.merge_tracks[track_idx]
         win = tk.Toplevel(self.root)
         win.title(f"字幕轨道设置 - {track.codec}")
-        win.geometry("300x100")
+        self.center_window(win, 300, 100)
         win.transient(self.root)
         win.grab_set()
         encoder_var = tk.StringVar(value=track.enc_settings.get("encoder", "copy"))
