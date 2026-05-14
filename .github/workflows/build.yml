@@ -40,7 +40,7 @@ jobs:
         
         # ⚠️ 修改点3：.pyw 脚本必备，禁用黑色控制台窗口
         windows-console-mode: disable
-        include-data-file: ./ffmpeg_presets.json=./ffmpeg_presets.json
+        include-data-file: python/ffmpeg_presets.json=./ffmpeg_presets.json
         # 如果你的脚本用了 Tkinter/CustomTkinter 等 GUI 库，可以开启对应插件
         # enable-plugins: tk-inter
 
