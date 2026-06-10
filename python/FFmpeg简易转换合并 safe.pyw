@@ -1,4 +1,4 @@
-﻿#!/usr/bin/env python3
+#!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 
 import tkinter as tk
@@ -28,6 +28,17 @@ except ImportError:
     root_temp.destroy()
 
 # ================== 公共工具函数 ==================
+
+def format_cmd_for_display(cmd_list: List[str]) -> str:
+    """
+    将命令列表转换为适合显示/复制的字符串，带必要的引号。
+    Windows 使用 subprocess.list2cmdline，Unix 使用 shlex.quote 逐个转义。
+    """
+    if sys.platform == "win32":
+        return subprocess.list2cmdline(cmd_list)
+    else:
+        return ' '.join(shlex.quote(arg) for arg in cmd_list)
+
 def normalize_path(path: str) -> str:
     """统一路径分隔符为正斜杠"""
     return path.replace('\\', '/')
@@ -1374,12 +1385,17 @@ class Task:
         self.error_msg = ""
 
     def get_short_cmd(self):
-        """生成简短显示命令（隐藏路径细节）"""
+        """生成简短显示命令（隐藏路径细节），但确保引号正确"""
         if not self.cmd:
             return ""
-        short = ' '.join(self.cmd)
-        short = re.sub(r'(-i\s+)(["\'])(.*?)\2', r'\1{input}', short)
-        short = re.sub(r'(["\'][^"\']+\.mp4["\'])$', r'{output}', short)
+        full_cmd = format_cmd_for_display(self.cmd)
+        # 替换输入和输出路径为占位符（注意路径中可能有引号）
+        # 先转义正则中的特殊字符
+        in_quoted = re.escape(self.input)
+        out_quoted = re.escape(self.output)
+        # 可能路径被包裹在双引号中，也可能没有，所以匹配 "path" 或 path
+        short = re.sub(rf'(["\']?){in_quoted}\1', r'{input}', full_cmd)
+        short = re.sub(rf'(["\']?){out_quoted}\1', r'{output}', short)
         return short
 
 # ================== Track 类 ==================
@@ -2492,7 +2508,7 @@ class FFmpegBatchGUI:
                 settings = self.get_current_settings()
                 output_path = self.generate_output_path(input_file, settings)
                 cmd_list = self.generate_ffmpeg_command(input_file, output_path, settings)
-            cmd_str = ' '.join(cmd_list)
+            cmd_str = format_cmd_for_display(cmd_list)
         except Exception as e:
             cmd_str = f"生成命令时出错: {e}"
         self.cmd_preview.delete(1.0, tk.END)
@@ -2844,8 +2860,11 @@ class FFmpegBatchGUI:
         if not self.tasks:
             messagebox.showinfo("提示", "任务列表为空，无法导出")
             return
-        file_path = filedialog.asksaveasfilename(title="导出脚本", defaultextension=".bat",
-            filetypes=[("Windows批处理", "*.bat"), ("Linux/macOS Shell", "*.sh"), ("所有文件", "*.*")])
+        file_path = filedialog.asksaveasfilename(
+            title="导出脚本",
+            defaultextension=".bat",
+            filetypes=[("Windows批处理", "*.bat"), ("Linux/macOS Shell", "*.sh"), ("所有文件", "*.*")]
+        )
         if not file_path:
             return
         try:
@@ -2857,9 +2876,7 @@ class FFmpegBatchGUI:
                 enc = "utf-8-sig"
             for task in self.tasks:
                 script_lines.append(f"echo Processing: {os.path.basename(task.input)}")
-                # 将列表命令转换为字符串（安全，因为导出的是批处理脚本，用户需自行负责）
-                cmd_str = ' '.join(task.cmd)
-                script_lines.append(cmd_str)
+                script_lines.append(format_cmd_for_display(task.cmd))
                 script_lines.append("")
             script_lines.append("echo All tasks completed.")
             with open(file_path, 'w', encoding=enc) as f:
@@ -2962,7 +2979,7 @@ class FFmpegBatchGUI:
             new_out = self.generate_output_path(task.input, new_settings)
             try:
                 new_cmd_list = self.generate_ffmpeg_command(task.input, new_out, new_settings)
-                new_cmd_str = ' '.join(new_cmd_list)
+                new_cmd_str = format_cmd_for_display(new_cmd_list)
             except ValueError as e:
                 new_cmd_str = f"参数错误: {e}"
             preview_text.delete(1.0, tk.END)
@@ -3562,20 +3579,8 @@ class FFmpegBatchGUI:
             self.merge_cmd_preview.delete(1.0, tk.END)
             self.merge_cmd_preview.insert(tk.END, "参数不完整，无法生成命令")
             return
-        readable = []
-        i = 0
-        while i < len(cmd_list):
-            arg = cmd_list[i]
-            if arg in ('-map', '-c:v', '-c:a', '-c:s', '-filter:v', '-crf:v', '-cq:v', '-global_quality:v', '-b:v', '-r:v', '-b:a', '-ar:a', '-map_chapters'):
-                if i+1 < len(cmd_list):
-                    readable.append(f"{arg} {cmd_list[i+1]}")
-                    i += 2
-                    continue
-            if ('/' in arg or '\\' in arg) and (' ' in arg or '#' in arg or '&' in arg):
-                arg = f'"{arg}"'
-            readable.append(arg)
-            i += 1
-        cmd_str = " ".join(readable)
+        # 直接使用格式化函数
+        cmd_str = format_cmd_for_display(cmd_list)
         self.merge_cmd_preview.delete(1.0, tk.END)
         self.merge_cmd_preview.insert(tk.END, cmd_str)
 
