@@ -1,38 +1,482 @@
-﻿import os
+import os
+import sys
 import json
 import copy
+import subprocess
+import platform
+import threading
 import tkinter as tk
 from tkinter import ttk, messagebox, filedialog, Toplevel, simpledialog
+from PIL import Image, ImageTk, ImageEnhance
+#删除到回收站需要的线程并发
+from concurrent.futures import ThreadPoolExecutor
 
-# 尝试导入拖拽库
+import ctypes
+from ctypes import wintypes
+import time
+
 try:
     from tkinterdnd2 import TkinterDnD, DND_FILES
     DND_AVAILABLE = True
 except ImportError:
     DND_AVAILABLE = False
-    # 创建虚拟的 TkinterDnD.Tk 类，使其继承自 tk.Tk
     class TkinterDnD:
         class Tk(tk.Tk):
             pass
     DND_FILES = None
 
-from PIL import Image, ImageTk
-from concurrent.futures import ThreadPoolExecutor
+
+def get_supported_extensions():
+    """返回Pillow支持的所有可读取图片扩展名（小写，包含点号）"""
+    exts = set()
+    # 从Pillow注册的扩展名中提取
+    for ext, format in Image.registered_extensions().items():
+        if format:  # 确保格式可读
+            exts.add(ext.lower())
+    # 补充一些常见但可能未注册的扩展名（Pillow通常支持但可能未全部列出）
+    additional = {
+        '.jpg', '.jpeg', '.png', '.webp', '.bmp', '.tiff', '.tif',
+        '.gif', '.ico', '.ppm', '.pgm', '.pbm', '.xbm', '.pcx', '.tga',
+        '.jp2', '.j2k', '.jpx', '.jpf'  # JPEG2000
+    }
+    exts.update(additional)
+    return exts
+
+SUPPORTED_IMG_EXTS = get_supported_extensions()
+
+
+def send_to_trash(path):
+    """跨平台地将文件或文件夹移动到回收站/废纸篓。"""
+    if platform.system() == 'Windows':
+        # Windows: 调用 Shell API
+        try:
+            import ctypes
+            from ctypes import wintypes
+            class SHFILEOPSTRUCTW(ctypes.Structure):
+                _fields_ = [
+                    ("hwnd", ctypes.c_void_p),
+                    ("wFunc", wintypes.UINT),
+                    ("pFrom", wintypes.LPCWSTR),
+                    ("pTo", wintypes.LPCWSTR),
+                    ("fFlags", wintypes.UINT),
+                    ("fAnyOperationsAborted", wintypes.BOOL),
+                    ("hNameMappings", ctypes.c_void_p),
+                    ("lpszProgressTitle", wintypes.LPCWSTR),
+                ]
+            # 定义常量
+            FO_DELETE = 0x0003
+            FOF_ALLOWUNDO = 0x0040   # 允许撤销 -> 放入回收站
+            FOF_NOCONFIRMATION = 0x0010
+            FOF_SILENT = 0x0004
+            # 构建操作结构体
+            file_op = SHFILEOPSTRUCTW()
+            file_op.wFunc = FO_DELETE
+            # 路径必须以双null结尾
+            file_op.pFrom = path + '\0\0'
+            file_op.fFlags = FOF_ALLOWUNDO | FOF_NOCONFIRMATION | FOF_SILENT
+            file_op.hwnd = 0
+            # 调用 Shell API
+            result = ctypes.windll.shell32.SHFileOperationW(ctypes.byref(file_op))
+            if result != 0:
+                raise OSError(f"SHFileOperationW failed with error code: {result}")
+        except Exception as e:
+            raise OSError(f"Failed to move '{path}' to Recycle Bin: {e}")
+    elif platform.system() == 'Darwin':
+        # macOS: 使用 osascript 调用 AppleScript
+        try:
+            script = f'''
+            tell application "Finder"
+                delete POSIX file "{path}"
+            end tell
+            '''
+            subprocess.run(['osascript', '-e', script], check=True, capture_output=True, text=True)
+        except subprocess.CalledProcessError as e:
+            raise OSError(f"Failed to move '{path}' to Trash: {e.stderr.strip()}")
+        except Exception as e:
+            raise OSError(f"Failed to move '{path}' to Trash: {e}")
+    else:
+        # Linux: 检查可用的 CLI 工具
+        # 优先使用 gio (GNOME) 或 kioclient5 (KDE)，最后尝试 trash-cli
+        try:
+            # 尝试使用 gio
+            subprocess.run(['gio', 'trash', path], check=True, capture_output=True, text=True)
+        except FileNotFoundError:
+            try:
+                # 尝试使用 kioclient5
+                subprocess.run(['kioclient5', 'move', path, 'trash:/'], check=True, capture_output=True, text=True)
+            except FileNotFoundError:
+                try:
+                    # 尝试使用 trash-cli
+                    subprocess.run(['trash-put', path], check=True, capture_output=True, text=True)
+                except FileNotFoundError:
+                    raise OSError("No supported trash CLI tool found (gio, kioclient5, or trash-put). Please install one.")
+        except subprocess.CalledProcessError as e:
+            raise OSError(f"Failed to move '{path}' to Trash: {e.stderr.strip()}")
+        except Exception as e:
+            raise OSError(f"Failed to move '{path}' to Trash: {e}")
+
+def get_preset_file_path():
+    if getattr(sys, 'frozen', False):
+        # 打包后的 exe：使用 exe 所在目录
+        base_dir = os.path.dirname(sys.executable)
+    else:
+        # 开发环境：使用脚本所在目录
+        base_dir = os.path.dirname(os.path.abspath(__file__))
+    return os.path.join(base_dir, "picpresets.json")
+
+class TemplateEditor(ttk.Frame):
+    """可复用的参数编辑组件（不含名称模板、重名处理等界面级选项）"""
+    def __init__(self, parent, include_exif_date_delete=True, default_expanded=False, **kwargs):
+        super().__init__(parent, **kwargs)
+        self.include_exif_date_delete = include_exif_date_delete
+        self.default_expanded = default_expanded
+        self.preview_callback = None
+        self._create_widgets()
+        self._setup_traces()
+        self._init_enhance_state()
+        if self.default_expanded:
+            self._toggle_enhance()
+
+    def _create_widgets(self):
+        # 第一行：格式、质量、旋转、翻转
+        row1 = ttk.Frame(self)
+        row1.pack(fill=tk.X, pady=2)
+        ttk.Label(row1, text="格式:").pack(side=tk.LEFT, padx=2)
+        self.format_var = tk.StringVar(value="JPEG")
+        format_combo = ttk.Combobox(row1, textvariable=self.format_var,
+                                    values=["JPEG", "PNG", "WEBP"], state="readonly", width=6)
+        format_combo.pack(side=tk.LEFT, padx=2)
+
+        ttk.Label(row1, text="质量:").pack(side=tk.LEFT, padx=(10,2))
+        self.quality_var = tk.IntVar(value=85)
+        quality_scale = ttk.Scale(row1, from_=1, to=100, variable=self.quality_var,
+                                  orient=tk.HORIZONTAL, length=80)
+        quality_scale.pack(side=tk.LEFT, padx=2)
+        self.quality_spin = ttk.Spinbox(row1, from_=1, to=100, textvariable=self.quality_var,
+                                        width=5, state='normal')
+        self.quality_spin.pack(side=tk.LEFT, padx=2)
+
+        ttk.Label(row1, text="旋转:").pack(side=tk.LEFT, padx=(10,2))
+        self.rotation_var = tk.StringVar(value="0°")
+        rot_frame = ttk.Frame(row1)
+        rot_frame.pack(side=tk.LEFT, padx=2)
+        for text, val in [("无", "0°"), ("左90", "90°"), ("右90", "-90°"), ("180", "180°")]:
+            ttk.Radiobutton(rot_frame, text=text, variable=self.rotation_var, value=val).pack(side=tk.LEFT, padx=2)
+
+        self.h_flip_var = tk.BooleanVar(value=False)
+        self.v_flip_var = tk.BooleanVar(value=False)
+        ttk.Checkbutton(row1, text="水平翻转", variable=self.h_flip_var).pack(side=tk.LEFT, padx=5)
+        ttk.Checkbutton(row1, text="垂直翻转", variable=self.v_flip_var).pack(side=tk.LEFT, padx=5)
+
+        # 第二行：尺寸调整 + 三个复选框（保留EXIF、维持日期、删除原文件）
+        row2 = ttk.Frame(self)
+        row2.pack(fill=tk.X, pady=2)
+        ttk.Label(row2, text="尺寸调整:").pack(side=tk.LEFT, padx=2)
+        self.resize_mode_var = tk.StringVar(value="无调整")
+        mode_combo = ttk.Combobox(row2, textvariable=self.resize_mode_var,
+                                  values=["无调整", "精确 (WxH)", "限制长边", "限制短边"],
+                                  state="readonly", width=12)
+        mode_combo.pack(side=tk.LEFT, padx=2)
+        self.width_label = ttk.Label(row2, text="宽:")
+        self.width_label.pack(side=tk.LEFT, padx=(10,2))
+        self.resize_width_var = tk.IntVar(value=800)
+        self.resize_width_spin = ttk.Spinbox(row2, from_=1, to=9999, textvariable=self.resize_width_var, width=6)
+        self.resize_width_spin.pack(side=tk.LEFT, padx=2)
+        ttk.Label(row2, text="高:").pack(side=tk.LEFT, padx=(5,2))
+        self.resize_height_var = tk.IntVar(value=600)
+        self.resize_height_spin = ttk.Spinbox(row2, from_=1, to=9999, textvariable=self.resize_height_var, width=6)
+        self.resize_height_spin.pack(side=tk.LEFT, padx=2)
+
+        if self.include_exif_date_delete:
+            self.keep_exif_var = tk.BooleanVar(value=False)
+            ttk.Checkbutton(row2, text="保留EXIF", variable=self.keep_exif_var).pack(side=tk.LEFT, padx=(20, 5))
+            self.preserve_date_var = tk.BooleanVar(value=False)
+            ttk.Checkbutton(row2, text="维持原始日期", variable=self.preserve_date_var).pack(side=tk.LEFT, padx=5)
+            self.delete_original_var = tk.BooleanVar(value=False)
+            ttk.Checkbutton(row2, text="删除原文件", variable=self.delete_original_var).pack(side=tk.LEFT, padx=5)
+
+        # 第三行：裁剪
+        row3 = ttk.Frame(self)
+        row3.pack(fill=tk.X, pady=2)
+        self.crop_enabled_var = tk.BooleanVar(value=False)
+        ttk.Checkbutton(row3, text="启用裁剪", variable=self.crop_enabled_var).pack(side=tk.LEFT, padx=2)
+        ttk.Label(row3, text="x:").pack(side=tk.LEFT, padx=(5,0))
+        self.crop_x_var = tk.StringVar(value="0")
+        ttk.Entry(row3, textvariable=self.crop_x_var, width=5).pack(side=tk.LEFT, padx=2)
+        ttk.Label(row3, text="y:").pack(side=tk.LEFT)
+        self.crop_y_var = tk.StringVar(value="0")
+        ttk.Entry(row3, textvariable=self.crop_y_var, width=5).pack(side=tk.LEFT, padx=2)
+        ttk.Label(row3, text="w:").pack(side=tk.LEFT)
+        self.crop_w_var = tk.StringVar(value="iw")
+        ttk.Entry(row3, textvariable=self.crop_w_var, width=6).pack(side=tk.LEFT, padx=2)
+        ttk.Label(row3, text="h:").pack(side=tk.LEFT)
+        self.crop_h_var = tk.StringVar(value="ih")
+        ttk.Entry(row3, textvariable=self.crop_h_var, width=6).pack(side=tk.LEFT, padx=2)
+        ttk.Label(row3, text="(支持 iw, ih, 四则运算)", foreground="gray").pack(side=tk.LEFT, padx=5)
+
+        self.toggle_btn = ttk.Button(row3, text="▶ 更多调整", width=12, command=self._toggle_enhance)
+        self.toggle_btn.pack(side=tk.RIGHT, padx=(0,15))
+
+        # 增强面板（初始隐藏）
+        self.enhance_expanded = False
+        self.enhance_frame = ttk.Frame(self)
+
+        # 亮度/对比/饱和/锐化
+        bc_frame = ttk.LabelFrame(self.enhance_frame, text="亮度/对比/饱和/锐化")
+        bc_frame.pack(fill=tk.X, pady=2, padx=5)
+        bc_row = ttk.Frame(bc_frame)
+        bc_row.pack(fill=tk.X, pady=2, padx=5)
+
+        self.brightness_enable = tk.BooleanVar(value=False)
+        ttk.Checkbutton(bc_row, text="亮度", variable=self.brightness_enable).pack(side=tk.LEFT)
+        self.brightness_var = tk.IntVar(value=0)
+        self.brightness_scale = ttk.Scale(bc_row, from_=-100, to=100, variable=self.brightness_var,
+                                          orient=tk.HORIZONTAL, length=90, state=tk.DISABLED)  # 长度改为80
+        self.brightness_scale.pack(side=tk.LEFT, padx=5)
+        self.brightness_label = ttk.Label(bc_row, text="0", width=4)
+        self.brightness_label.pack(side=tk.LEFT)
+
+        ttk.Label(bc_row, text="  ").pack(side=tk.LEFT)  # 间距缩小
+        self.contrast_enable = tk.BooleanVar(value=False)
+        ttk.Checkbutton(bc_row, text="对比度", variable=self.contrast_enable).pack(side=tk.LEFT)
+        self.contrast_var = tk.IntVar(value=0)
+        self.contrast_scale = ttk.Scale(bc_row, from_=-100, to=100, variable=self.contrast_var,
+                                        orient=tk.HORIZONTAL, length=90, state=tk.DISABLED)
+        self.contrast_scale.pack(side=tk.LEFT, padx=5)
+        self.contrast_label = ttk.Label(bc_row, text="0", width=4)
+        self.contrast_label.pack(side=tk.LEFT)
+
+        ttk.Label(bc_row, text="  ").pack(side=tk.LEFT)
+        self.saturation_enable = tk.BooleanVar(value=False)
+        ttk.Checkbutton(bc_row, text="饱和度", variable=self.saturation_enable).pack(side=tk.LEFT)
+        self.saturation_var = tk.IntVar(value=0)
+        self.saturation_scale = ttk.Scale(bc_row, from_=-100, to=100, variable=self.saturation_var,
+                                          orient=tk.HORIZONTAL, length=90, state=tk.DISABLED)
+        self.saturation_scale.pack(side=tk.LEFT, padx=5)
+        self.saturation_label = ttk.Label(bc_row, text="0", width=4)
+        self.saturation_label.pack(side=tk.LEFT)
+
+        ttk.Label(bc_row, text="  ").pack(side=tk.LEFT)
+        self.sharpen_enable = tk.BooleanVar(value=False)
+        ttk.Checkbutton(bc_row, text="锐化", variable=self.sharpen_enable).pack(side=tk.LEFT)
+        self.sharpen_var = tk.IntVar(value=0)
+        self.sharpen_scale = ttk.Scale(bc_row, from_=-100, to=100, variable=self.sharpen_var,
+                                       orient=tk.HORIZONTAL, length=90, state=tk.DISABLED)
+        self.sharpen_scale.pack(side=tk.LEFT, padx=5)
+        self.sharpen_label = ttk.Label(bc_row, text="0", width=4)
+        self.sharpen_label.pack(side=tk.LEFT)
+
+        # 色彩平衡
+        color_frame = ttk.LabelFrame(self.enhance_frame, text="色彩平衡")
+        color_frame.pack(fill=tk.X, pady=2, padx=5)
+        color_header = ttk.Frame(color_frame)
+        color_header.pack(fill=tk.X, pady=2, padx=5)
+        self.color_enable = tk.BooleanVar(value=False)
+        ttk.Checkbutton(color_header, text="启用RGB调整", variable=self.color_enable).pack(side=tk.LEFT)
+
+        rgb_row = ttk.Frame(color_frame)
+        rgb_row.pack(fill=tk.X, pady=2, padx=5)
+
+        self.r_var = tk.IntVar(value=0)
+        r_frame = ttk.Frame(rgb_row)
+        r_frame.pack(side=tk.LEFT, padx=2, expand=True, fill=tk.X)
+        ttk.Label(r_frame, text="红", width=4).pack(side=tk.LEFT)
+        self.r_scale = ttk.Scale(r_frame, from_=-100, to=100, variable=self.r_var,
+                                 orient=tk.HORIZONTAL, length=100, state=tk.DISABLED)
+        self.r_scale.pack(side=tk.LEFT, padx=2, fill=tk.X, expand=True)
+        self.r_label = ttk.Label(r_frame, text="0", width=4)
+        self.r_label.pack(side=tk.LEFT)
+
+        self.g_var = tk.IntVar(value=0)
+        g_frame = ttk.Frame(rgb_row)
+        g_frame.pack(side=tk.LEFT, padx=2, expand=True, fill=tk.X)
+        ttk.Label(g_frame, text="绿", width=4).pack(side=tk.LEFT)
+        self.g_scale = ttk.Scale(g_frame, from_=-100, to=100, variable=self.g_var,
+                                 orient=tk.HORIZONTAL, length=100, state=tk.DISABLED)
+        self.g_scale.pack(side=tk.LEFT, padx=2, fill=tk.X, expand=True)
+        self.g_label = ttk.Label(g_frame, text="0", width=4)
+        self.g_label.pack(side=tk.LEFT)
+
+        self.b_var = tk.IntVar(value=0)
+        b_frame = ttk.Frame(rgb_row)
+        b_frame.pack(side=tk.LEFT, padx=2, expand=True, fill=tk.X)
+        ttk.Label(b_frame, text="蓝", width=4).pack(side=tk.LEFT)
+        self.b_scale = ttk.Scale(b_frame, from_=-100, to=100, variable=self.b_var,
+                                 orient=tk.HORIZONTAL, length=100, state=tk.DISABLED)
+        self.b_scale.pack(side=tk.LEFT, padx=2, fill=tk.X, expand=True)
+        self.b_label = ttk.Label(b_frame, text="0", width=4)
+        self.b_label.pack(side=tk.LEFT)
+
+
+
+    def _setup_traces(self):
+        vars_list = [
+            self.format_var, self.quality_var, self.rotation_var,
+            self.h_flip_var, self.v_flip_var, self.resize_mode_var,
+            self.resize_width_var, self.resize_height_var, self.crop_enabled_var,
+            self.crop_x_var, self.crop_y_var, self.crop_w_var, self.crop_h_var,
+            self.brightness_enable, self.brightness_var, self.contrast_enable,
+            self.contrast_var, self.color_enable, self.r_var, self.g_var, self.b_var,
+            self.saturation_enable, self.saturation_var,
+            self.sharpen_enable, self.sharpen_var  # 添加锐化变量跟踪
+        ]
+        if self.include_exif_date_delete:
+            vars_list.extend([self.keep_exif_var, self.preserve_date_var, self.delete_original_var])
+
+        for var in vars_list:
+            var.trace_add('write', lambda *a: self._on_settings_changed())
+
+
+        self.brightness_var.trace_add('write', lambda *a: self.brightness_label.config(text=str(self.brightness_var.get())))
+        self.contrast_var.trace_add('write', lambda *a: self.contrast_label.config(text=str(self.contrast_var.get())))
+        self.saturation_var.trace_add('write', lambda *a: self.saturation_label.config(text=str(self.saturation_var.get())))
+        self.sharpen_var.trace_add('write', lambda *a: self.sharpen_label.config(text=str(self.sharpen_var.get())))
+        self.r_var.trace_add('write', lambda *a: self.r_label.config(text=str(self.r_var.get())))
+        self.g_var.trace_add('write', lambda *a: self.g_label.config(text=str(self.g_var.get())))
+        self.b_var.trace_add('write', lambda *a: self.b_label.config(text=str(self.b_var.get())))
+
+        self.resize_mode_var.trace_add('write', lambda *a: self._on_resize_mode_changed())
+        self._on_resize_mode_changed()
+
+        self.brightness_enable.trace_add('write', lambda *a: self._update_enhance_enable())
+        self.contrast_enable.trace_add('write', lambda *a: self._update_enhance_enable())
+        self.color_enable.trace_add('write', lambda *a: self._update_enhance_enable())
+        self.saturation_enable.trace_add('write', lambda *a: self._update_enhance_enable())
+        self.sharpen_enable.trace_add('write', lambda *a: self._update_enhance_enable())
+
+    def _init_enhance_state(self):
+        self._update_enhance_enable()
+
+    def _update_enhance_enable(self):
+        self.brightness_scale.config(state=tk.NORMAL if self.brightness_enable.get() else tk.DISABLED)
+        self.contrast_scale.config(state=tk.NORMAL if self.contrast_enable.get() else tk.DISABLED)
+        self.saturation_scale.config(state=tk.NORMAL if self.saturation_enable.get() else tk.DISABLED)
+        self.sharpen_scale.config(state=tk.NORMAL if self.sharpen_enable.get() else tk.DISABLED)
+        state = tk.NORMAL if self.color_enable.get() else tk.DISABLED
+        self.r_scale.config(state=state)
+        self.g_scale.config(state=state)
+        self.b_scale.config(state=state)
+
+    def _on_resize_mode_changed(self):
+        mode = self.resize_mode_var.get()
+        if mode == "限制长边":
+            self.width_label.config(text="长边:")
+            self.resize_height_spin.config(state=tk.DISABLED)
+        elif mode == "限制短边":
+            self.width_label.config(text="短边:")
+            self.resize_height_spin.config(state=tk.DISABLED)
+        else:
+            self.width_label.config(text="宽:")
+            self.resize_height_spin.config(state=tk.NORMAL)
+        self._on_settings_changed()
+
+    def _toggle_enhance(self):
+        if self.enhance_expanded:
+            self.enhance_frame.pack_forget()
+            self.toggle_btn.config(text="▶ 更多调整")
+            self.enhance_expanded = False
+        else:
+            self.enhance_frame.pack(fill=tk.X, pady=2)
+            self.toggle_btn.config(text="▼ 更多调整")
+            self.enhance_expanded = True
+
+    def _on_settings_changed(self):
+        if self.preview_callback:
+            self.preview_callback(self.get_settings())
+
+    def bind_preview_callback(self, callback):
+        self.preview_callback = callback
+
+    def get_settings(self):
+        settings = {
+            'format': self.format_var.get(),
+            'quality': self.quality_var.get(),
+            'rotation': self.rotation_var.get(),
+            'h_flip': self.h_flip_var.get(),
+            'v_flip': self.v_flip_var.get(),
+            'resize_mode': self.resize_mode_var.get(),
+            'resize_w': self.resize_width_var.get(),
+            'resize_h': self.resize_height_var.get(),
+            'crop_enabled': self.crop_enabled_var.get(),
+            'crop_x': self.crop_x_var.get(),
+            'crop_y': self.crop_y_var.get(),
+            'crop_w': self.crop_w_var.get(),
+            'crop_h': self.crop_h_var.get(),
+            'brightness_enable': self.brightness_enable.get(),
+            'brightness_val': self.brightness_var.get(),
+            'contrast_enable': self.contrast_enable.get(),
+            'contrast_val': self.contrast_var.get(),
+            'color_enable': self.color_enable.get(),
+            'r_gain': self.r_var.get(),
+            'g_gain': self.g_var.get(),
+            'b_gain': self.b_var.get(),
+            'saturation_enable': self.saturation_enable.get(),
+            'saturation_val': self.saturation_var.get(),
+            'sharpen_enable': self.sharpen_enable.get(),    # 新增锐化
+            'sharpen_val': self.sharpen_var.get(),          # 新增锐化值
+        }
+        if self.include_exif_date_delete:
+            settings.update({
+                'keep_exif': self.keep_exif_var.get(),
+                'preserve_original_date': self.preserve_date_var.get(),
+                'delete_original': self.delete_original_var.get(),
+            })
+        return settings
+
+    def set_settings(self, settings):
+        self.format_var.set(settings.get('format', 'JPEG'))
+        self.quality_var.set(settings.get('quality', 85))
+        self.rotation_var.set(settings.get('rotation', '0°'))
+        self.h_flip_var.set(settings.get('h_flip', False))
+        self.v_flip_var.set(settings.get('v_flip', False))
+        self.resize_mode_var.set(settings.get('resize_mode', '无调整'))
+        self.resize_width_var.set(settings.get('resize_w', 800))
+        self.resize_height_var.set(settings.get('resize_h', 600))
+        self.crop_enabled_var.set(settings.get('crop_enabled', False))
+        self.crop_x_var.set(settings.get('crop_x', '0'))
+        self.crop_y_var.set(settings.get('crop_y', '0'))
+        self.crop_w_var.set(settings.get('crop_w', 'iw'))
+        self.crop_h_var.set(settings.get('crop_h', 'ih'))
+        self.brightness_enable.set(settings.get('brightness_enable', False))
+        self.brightness_var.set(settings.get('brightness_val', 0))
+        self.contrast_enable.set(settings.get('contrast_enable', False))
+        self.contrast_var.set(settings.get('contrast_val', 0))
+        self.color_enable.set(settings.get('color_enable', False))
+        self.r_var.set(settings.get('r_gain', 0))
+        self.g_var.set(settings.get('g_gain', 0))
+        self.b_var.set(settings.get('b_gain', 0))
+        self.saturation_enable.set(settings.get('saturation_enable', False))
+        self.saturation_var.set(settings.get('saturation_val', 0))
+        self.sharpen_enable.set(settings.get('sharpen_enable', False))   # 新增锐化
+        self.sharpen_var.set(settings.get('sharpen_val', 0))             # 新增锐化值
+        if self.include_exif_date_delete:
+            self.keep_exif_var.set(settings.get('keep_exif', False))
+            self.preserve_date_var.set(settings.get('preserve_original_date', False))
+            self.delete_original_var.set(settings.get('delete_original', False))
+        self._on_resize_mode_changed()
+        self._update_enhance_enable()
+        self._on_settings_changed()
+
 
 class ImageConverter(TkinterDnD.Tk):
     def __init__(self):
         super().__init__()
         # 根据拖拽库可用性设置窗口标题
         if DND_AVAILABLE:
-            self.title("图片批量转换器 (支持拖拽)")
+            self.title("图片批量转换 Lite (支持拖拽)")
         else:
-            self.title("图片批量转换器 (拖拽不可用，请使用按钮)")
-        script_dir = os.path.dirname(os.path.abspath(__file__))
-        self.preset_file = os.path.join(script_dir, "picpresets.json")
-        
-        # 加载配置（扁平结构）
+            self.title("图片批量转换 Lite (拖拽不可用，请使用按钮)")
+        if getattr(sys, 'frozen', False):
+            # 打包后：exe 所在目录
+            base_dir = os.path.dirname(sys.executable)
+        else:
+            # 开发环境：脚本所在目录
+            base_dir = os.path.dirname(os.path.abspath(__file__))
+        self.preset_file = os.path.join(base_dir, "picpresets.json")
+
+        # 加载配置
         self.load_settings_and_presets()
-        
+
         # 窗口大小
         screen_width = self.winfo_screenwidth()
         screen_height = self.winfo_screenheight()
@@ -40,19 +484,36 @@ class ImageConverter(TkinterDnD.Tk):
         y = (screen_height - self.window_height) // 2
         self.geometry(f"{self.window_width}x{self.window_height}+{x}+{y}")
         self.resizable(True, True)
-        
+
         self.tasks = []
-        self.history = []          # 撤销历史
+        self.history = []
         self.history_index = -1
         self.output_dir = tk.StringVar(value=self.default_output_dir)
         self.converting = False
         self.executor = None
         self.futures = []
         self.total_tasks = 0
+        self.rename_lock = threading.Lock()
+        self.preview_window = None
+        self.preview_canvas = None
+        self.preview_status = None
+
+        # ========== 新增：解析命令行参数，必须在 create_widgets 之前 ==========
+        self.initial_files = []
+        if len(sys.argv) > 1:
+            for arg in sys.argv[1:]:
+                arg = arg.strip('"')
+                if os.path.exists(arg):
+                    self.initial_files.append(arg)
+        # ==================================================================
+
 
         self.create_widgets()
         self.load_presets_list()
         self.save_current_state_to_history()
+        # 如果有命令行传入的文件/文件夹，延迟添加
+        if self.initial_files:
+            self.after(100, self._add_initial_files)
 
         # 右键菜单
         self.context_menu = tk.Menu(self, tearoff=0)
@@ -61,6 +522,7 @@ class ImageConverter(TkinterDnD.Tk):
         self.context_menu.add_command(label="移除当前任务", command=self.remove_selected)
 
         self.bind_all("<Button-1>", self.on_click_outside, add=True)
+        self.bind("<Configure>", lambda e: self._position_preview_window())
 
         # 拖拽初始化（仅当库可用时）
         if DND_AVAILABLE:
@@ -70,20 +532,251 @@ class ImageConverter(TkinterDnD.Tk):
             messagebox.showwarning("提示", "未安装 tkinterdnd2 库，拖拽添加功能不可用。\n可使用按钮添加图片或文件夹。")
 
         self.processed_indices = set()
+
         self.protocol("WM_DELETE_WINDOW", self.on_closing)
 
-    # ========== 配置加载/保存（扁平结构：settings + 预设） ==========
+
+    def _add_initial_files(self):
+        """处理命令行传入的文件/文件夹"""
+        image_files = []
+        for path in self.initial_files:
+            if os.path.isdir(path):
+                for root, dirs, files in os.walk(path):
+                    for f in files:
+                        if os.path.splitext(f)[1].lower() in SUPPORTED_IMG_EXTS:
+                            image_files.append(os.path.join(root, f))
+            elif os.path.isfile(path) and os.path.splitext(path)[1].lower() in SUPPORTED_IMG_EXTS:
+                image_files.append(path)
+        if image_files:
+            self._add_image_paths(image_files)
+#            messagebox.showinfo("提示", f"已自动添加 {len(image_files)} 张图片")
+
+    def set_file_times(self, filepath, creation_time, access_time, modification_time):
+        """设置文件的创建时间、访问时间和修改时间（Windows专用）"""
+        if platform.system() != 'Windows':
+            # 非Windows系统只能通过os.utime设置访问和修改时间
+            os.utime(filepath, (access_time, modification_time))
+            return
+        
+        # 将Python时间戳（浮点数）转换为Windows FILETIME（100纳秒间隔，从1601年1月1日起）
+        def to_filetime(timestamp):
+            # Windows epoch 1601-01-01 到 Unix epoch 1970-01-01 的间隔（秒）
+            EPOCH_DIFF = 11644473600.0
+            # 转换为100纳秒单位
+            ft = int((timestamp + EPOCH_DIFF) * 10000000)
+            # 低位和高位
+            low = ft & 0xFFFFFFFF
+            high = ft >> 32
+            return wintypes.DWORD(low), wintypes.DWORD(high)
+        
+        # 转换时间
+        ct_low, ct_high = to_filetime(creation_time)
+        at_low, at_high = to_filetime(access_time)
+        mt_low, mt_high = to_filetime(modification_time)
+        
+        # 创建 FILETIME 结构体
+        class FILETIME(ctypes.Structure):
+            _fields_ = [("dwLowDateTime", wintypes.DWORD),
+                        ("dwHighDateTime", wintypes.DWORD)]
+        
+        creation_ft = FILETIME(ct_low, ct_high)
+        access_ft = FILETIME(at_low, at_high)
+        modify_ft = FILETIME(mt_low, mt_high)
+        
+        # 调用 SetFileTime
+        kernel32 = ctypes.windll.kernel32
+        handle = kernel32.CreateFileW(filepath, 0x40000000, 0x3, None, 3, 0x80, None)  # 打开文件以写入属性
+        if handle != -1:
+            kernel32.SetFileTime(handle, ctypes.byref(creation_ft), ctypes.byref(access_ft), ctypes.byref(modify_ft))
+            kernel32.CloseHandle(handle)
+
+
+    # ---------- 预览功能 ----------
+    def on_task_select(self, event=None):
+        sel = self.task_listbox.curselection()
+        if len(sel) == 1:
+            self._show_preview(self.tasks[sel[0]])
+
+    def _show_preview(self, task):
+        if self.preview_window is not None and self.preview_window.winfo_exists():
+            self._update_preview_content(task)
+            self._position_preview_window()
+            self.preview_window.lift()
+        else:
+            self.preview_window = Toplevel(self)
+            self.preview_window.title("图片预览")
+            self.preview_window.transient(self)
+            self.preview_window.attributes('-toolwindow', 1)
+            self.preview_window.geometry("500x500")
+            self.preview_window.minsize(200, 200)
+            self.preview_canvas = tk.Canvas(self.preview_window, bg='gray', relief=tk.SUNKEN)
+            self.preview_canvas.pack(fill=tk.BOTH, expand=True, padx=5, pady=5)
+            self.preview_status = ttk.Label(self.preview_window, text="正在生成预览...")
+            self.preview_status.pack(pady=5)
+
+            def on_close():
+                if self.preview_window:
+                    self.preview_window.destroy()
+                    self.preview_window = None
+                    self.preview_canvas = None
+                    self.preview_status = None
+            self.preview_window.protocol("WM_DELETE_WINDOW", on_close)
+            self.preview_window.update_idletasks()
+            self._position_preview_window()
+            self._update_preview_content(task)
+
+    def _position_preview_window(self):
+        if self.preview_window is None or not self.preview_window.winfo_exists():
+            return
+        self.update_idletasks()
+        main_x = self.winfo_x()
+        main_y = self.winfo_y()
+        main_w = self.winfo_width()
+        main_h = self.winfo_height()
+        win_w = self.preview_window.winfo_reqwidth()
+        win_h = self.preview_window.winfo_reqheight()
+        if win_w < 100:
+            win_w = 500
+        if win_h < 100:
+            win_h = 500
+        screen_w = self.winfo_screenwidth()
+        screen_h = self.winfo_screenheight()
+        x = main_x + main_w + 5
+        y = main_y
+        if x + win_w > screen_w:
+            x = screen_w - win_w - 10
+            if x < 0:
+                x = 10
+        if y + win_h > screen_h:
+            y = screen_h - win_h - 10
+        if y < 0:
+            y = 10
+        self.preview_window.geometry(f"+{x}+{y}")
+
+    def _update_preview_content(self, task):
+        if self.preview_window is None or not self.preview_window.winfo_exists():
+            return
+        if self.preview_canvas:
+            self.preview_canvas.delete("all")
+        if self.preview_status:
+            self.preview_status.config(text="正在生成预览...")
+    
+        def generate():
+            if self.preview_window is None or not self.preview_window.winfo_exists():
+                return
+            try:
+                # 使用 with 确保预览用图片被正确关闭
+                with Image.open(task['path']) as img:
+                    # 旋转
+                    angle = int(task['rotation'].rstrip('°'))
+                    if angle != 0:
+                        img = img.rotate(angle, expand=True, resample=Image.NEAREST)
+                    # 翻转
+                    if task['h_flip']:
+                        img = img.transpose(Image.FLIP_LEFT_RIGHT)
+                    if task['v_flip']:
+                        img = img.transpose(Image.FLIP_TOP_BOTTOM)
+    
+                    # 缩放
+                    if task['resize_mode'] != "无调整":
+                        img = self.apply_resize(img, task['resize_mode'], task['resize_w'], task['resize_h'], resample=Image.NEAREST)
+    
+                    # 裁剪
+                    if task.get('crop_enabled', False):
+                        w_cur, h_cur = img.size
+                        x = self.eval_crop_expr(task['crop_x'], w_cur, h_cur)
+                        y = self.eval_crop_expr(task['crop_y'], w_cur, h_cur)
+                        w = self.eval_crop_expr(task['crop_w'], w_cur, h_cur)
+                        h = self.eval_crop_expr(task['crop_h'], w_cur, h_cur)
+                        x = max(0, min(x, w_cur-1))
+                        y = max(0, min(y, h_cur-1))
+                        w = min(w, w_cur - x)
+                        h = min(h, h_cur - y)
+                        if w > 0 and h > 0:
+                            img = img.crop((x, y, x+w, y+h))
+    
+                    # 亮度
+                    if task.get('brightness_enable', False) and task.get('brightness_val', 0) != 0:
+                        enhancer = ImageEnhance.Brightness(img)
+                        factor = 1 + task['brightness_val'] / 100.0
+                        img = enhancer.enhance(factor)
+    
+                    # 对比度
+                    if task.get('contrast_enable', False) and task.get('contrast_val', 0) != 0:
+                        enhancer = ImageEnhance.Contrast(img)
+                        factor = 1 + task['contrast_val'] / 100.0
+                        img = enhancer.enhance(factor)
+    
+                    # 饱和度
+                    if task.get('saturation_enable', False) and task.get('saturation_val', 0) != 0:
+                        enhancer = ImageEnhance.Color(img)
+                        factor = 1 + task['saturation_val'] / 100.0
+                        img = enhancer.enhance(factor)
+    
+                    # RGB
+                    if task.get('color_enable', False):
+                        r_factor = (task.get('r_gain', 0) + 100) / 100.0
+                        g_factor = (task.get('g_gain', 0) + 100) / 100.0
+                        b_factor = (task.get('b_gain', 0) + 100) / 100.0
+                        if r_factor != 1 or g_factor != 1 or b_factor != 1:
+                            r, g, b = img.split()
+                            r = r.point(lambda i: i * r_factor)
+                            g = g.point(lambda i: i * g_factor)
+                            b = b.point(lambda i: i * b_factor)
+                            img = Image.merge('RGB', (r, g, b))
+    
+                    # 锐化
+                    if task.get('sharpen_enable', False) and task.get('sharpen_val', 0) != 0:
+                        enhancer = ImageEnhance.Sharpness(img)
+                        factor = 1 + task['sharpen_val'] / 100.0
+                        img = enhancer.enhance(factor)
+    
+                    # 缩放预览到画布大小
+                    # 缩放到长边 600
+                    img.thumbnail((500, 500), Image.NEAREST)
+                    thumb_w, thumb_h = img.size
+                    
+                    # 调整窗口大小
+                    win_w = thumb_w + 20
+                    win_h = thumb_h + 70
+                    self.preview_window.geometry(f"{win_w}x{win_h}")
+                    
+                    # 更新 Canvas 尺寸
+                    self.preview_canvas.config(width=thumb_w, height=thumb_h)
+                    
+                    # 创建 PhotoImage 并保持引用
+                    photo = ImageTk.PhotoImage(img)
+                    self.preview_canvas.delete("all")
+                    self.preview_canvas.create_image(thumb_w//2, thumb_h//2, image=photo, anchor=tk.CENTER)
+                    self.preview_canvas.image = photo  # 关键：防止被垃圾回收
+                    
+                    # 强制刷新画布
+                    self.preview_canvas.update_idletasks()
+                    
+                    if self.preview_status:
+                        self.preview_status.config(text=f"预览完成 | 缩略图尺寸: {thumb_w}x{thumb_h}")
+            except Exception as e:
+                if self.preview_status:
+                    self.preview_status.config(text=f"预览失败: {str(e)}")
+                if self.preview_canvas:
+                    self.preview_canvas.delete("all")
+                    self.preview_canvas.create_text(10, 10, anchor=tk.NW, text=f"错误: {e}", fill="red")
+    
+        self.preview_window.after(10, generate)
+
+    # ---------- 配置加载/保存 ----------
     def load_settings_and_presets(self):
         """加载配置文件：顶层包含 settings 对象和各个预设"""
         default_settings = {
-            "window_width": 1200,
+            "window_width": 860,
             "window_height": 760,
             "default_output_dir": os.getcwd(),
             "thread_count": min(8, os.cpu_count() or 4),
             "keep_exif": False,
+            "preserve_original_date": False,
+            "delete_original": False,
         }
         self.presets = {}
-
         if not os.path.exists(self.preset_file):
             # 新文件，使用默认值
             self.window_width = default_settings["window_width"]
@@ -91,14 +784,14 @@ class ImageConverter(TkinterDnD.Tk):
             self.default_output_dir = default_settings["default_output_dir"]
             self.default_threads = default_settings["thread_count"]
             self.keep_exif = default_settings["keep_exif"]
+            self.preserve_original_date = default_settings["preserve_original_date"]
+            self.delete_original = default_settings["delete_original"]
             return
-
         try:
             with open(self.preset_file, 'r', encoding='utf-8') as f:
                 data = json.load(f)
             if not isinstance(data, dict):
                 raise ValueError("配置文件格式错误")
-            
             # 读取 settings 对象
             settings = data.get("settings", {})
             self.window_width = settings.get("window_width", default_settings["window_width"])
@@ -106,10 +799,9 @@ class ImageConverter(TkinterDnD.Tk):
             self.default_output_dir = settings.get("default_output_dir", default_settings["default_output_dir"])
             self.default_threads = settings.get("thread_count", default_settings["thread_count"])
             self.keep_exif = settings.get("keep_exif", default_settings["keep_exif"])
-            
-            # 其余所有键（除了 "settings"）都视为预设
+            self.preserve_original_date = settings.get("preserve_original_date", default_settings["preserve_original_date"])
+            self.delete_original = settings.get("delete_original", default_settings["delete_original"])
             self.presets = {k: v for k, v in data.items() if k != "settings"}
-            
         except Exception as e:
             print(f"加载配置失败: {e}，使用默认值")
             self.window_width = default_settings["window_width"]
@@ -117,6 +809,8 @@ class ImageConverter(TkinterDnD.Tk):
             self.default_output_dir = default_settings["default_output_dir"]
             self.default_threads = default_settings["thread_count"]
             self.keep_exif = default_settings["keep_exif"]
+            self.preserve_original_date = default_settings["preserve_original_date"]
+            self.delete_original = default_settings["delete_original"]
             self.presets = {}
 
     def save_settings_and_presets(self):
@@ -125,16 +819,17 @@ class ImageConverter(TkinterDnD.Tk):
             "settings": {
                 "window_width": self.winfo_width(),
                 "window_height": self.winfo_height(),
-                "default_output_dir": self.output_dir.get(),
+                "default_output_dir": os.path.normpath(self.output_dir.get()),
                 "thread_count": self.thread_count_var.get(),
                 "keep_exif": self.keep_exif_var.get(),
+                "preserve_original_date": self.preserve_date_var.get(),
+                "delete_original": self.delete_original_var.get(),
             }
         }
         # 添加所有预设
         for name, preset in self.presets.items():
             if name != "settings":
                 data[name] = preset
-        
         try:
             with open(self.preset_file, 'w', encoding='utf-8') as f:
                 json.dump(data, f, indent=4, ensure_ascii=False)
@@ -147,7 +842,7 @@ class ImageConverter(TkinterDnD.Tk):
             self.executor.shutdown(wait=False)
         self.destroy()
 
-    # ========== 撤销功能 ==========
+    # ---------- 撤销功能 ----------
     def save_current_state_to_history(self):
         snapshot = copy.deepcopy(self.tasks)
         self.history = self.history[:self.history_index+1]
@@ -165,7 +860,6 @@ class ImageConverter(TkinterDnD.Tk):
             self.history_index -= 1
             self.tasks = copy.deepcopy(self.history[self.history_index])
             self.refresh_task_listbox()
-            self.preview_canvas.delete("all")
             messagebox.showinfo("撤销", "已恢复到上一次状态")
         else:
             messagebox.showinfo("提示", "没有更早的状态")
@@ -175,7 +869,6 @@ class ImageConverter(TkinterDnD.Tk):
         for task in self.tasks:
             self.task_listbox.insert(tk.END, self.get_task_display_text(task))
 
-    # ========== 递归设置控件状态 ==========
     def set_widgets_state(self, widget, state):
         try:
             if isinstance(widget, (ttk.Button, ttk.Combobox, ttk.Entry, ttk.Checkbutton,
@@ -197,11 +890,11 @@ class ImageConverter(TkinterDnD.Tk):
         self.undo_btn.config(state=state)
         self.add_files_btn.config(state=state)
         self.add_folder_btn.config(state=state)
-        self.set_widgets_state(self.template_frame, state)
         self.browse_btn.config(state=state)
         self.load_preset_btn.config(state=state)
         self.save_preset_btn.config(state=state)
-        # 拖拽注册/解注册（仅当库可用时）
+        self.delete_preset_btn.config(state=state)
+        self.set_widgets_state(self.template_container, state)
         if DND_AVAILABLE:
             if enabled:
                 self.drop_target_register(DND_FILES)
@@ -223,7 +916,7 @@ class ImageConverter(TkinterDnD.Tk):
         except:
             pass
 
-    # ========== 表达式计算 ==========
+    # ---------- 表达式计算 ----------
     def eval_crop_expr(self, expr, width, height):
         if not isinstance(expr, str):
             expr = str(expr)
@@ -237,174 +930,203 @@ class ImageConverter(TkinterDnD.Tk):
         except:
             return 0
 
-    # ========== 界面构建 ==========
+    # ---------- 重名处理 ----------
+    def resolve_duplicate_paths(self, tasks, out_dir):
+        """
+        解析重复文件名的处理策略。
+        参数:
+            tasks: 原始任务列表（字典）
+            out_dir: 输出目录，如果为 None 则表示输出到每个文件的原目录
+        返回:
+            list of (task, original_index) 元组，task 中已包含 'out_path' 键
+        """
+        resolved_items = []
+        duplicate_mode = self.duplicate_mode_var.get()
+        
+        # 辅助函数：根据任务和输出目录生成最终输出路径
+        def make_output_path(task, base_out_dir):
+            name_or_path = self.build_output_name(task['name_template'], task['path'])
+            ext_map = {'JPEG':'.jpg', 'PNG':'.png', 'WEBP':'.webp'}
+            ext = ext_map[task['format']]
+            
+            # 如果名称模板包含了 {Original}，则 name_or_path 已经是完整路径（不含扩展名）
+            if "{Original}" in task['name_template']:
+                full_path = name_or_path + ext
+            else:
+                # 未使用 {Original}，则需要拼接基础目录和文件名
+                if base_out_dir is None:
+                    # 输出到原文件所在目录
+                    base_out_dir = os.path.dirname(task['path'])
+                full_path = os.path.join(base_out_dir, name_or_path + ext)
+            return full_path
+        
+        if duplicate_mode in ("覆盖", "自动重命名"):
+            for idx, task in enumerate(tasks):
+                task_copy = task.copy()
+                task_copy['out_path'] = None   # 稍后在转换时决定，以避免文件名冲突
+                resolved_items.append((task_copy, idx))
+            return resolved_items
+        
+        if duplicate_mode == "跳过":
+            for idx, task in enumerate(tasks):
+                base_out = make_output_path(task, out_dir)
+                if os.path.exists(base_out):
+                    continue   # 跳过此任务
+                task_copy = task.copy()
+                task_copy['out_path'] = base_out
+                resolved_items.append((task_copy, idx))
+            return resolved_items
+        
+        if duplicate_mode == "询问":
+            conflicts = []
+            for idx, task in enumerate(tasks):
+                base_out = make_output_path(task, out_dir)
+                conflicts.append((task, base_out, idx))
+            
+            apply_to_all = None
+            for task, original_path, original_idx in conflicts:
+                final_path = original_path
+                if os.path.exists(original_path):
+                    if apply_to_all is None:
+                        result = self._ask_duplicate_action(original_path)
+                        if result == "apply_overwrite":
+                            apply_to_all = "overwrite"
+                            final_path = original_path
+                        elif result == "apply_rename":
+                            apply_to_all = "rename"
+                            final_path = self._auto_rename_path(original_path)
+                        elif result == "apply_skip":
+                            apply_to_all = "skip"
+                            continue
+                        elif result == "overwrite":
+                            final_path = original_path
+                        elif result == "rename":
+                            final_path = self._auto_rename_path(original_path)
+                        elif result == "skip":
+                            continue
+                    else:
+                        if apply_to_all == "overwrite":
+                            final_path = original_path
+                        elif apply_to_all == "rename":
+                            final_path = self._auto_rename_path(original_path)
+                        elif apply_to_all == "skip":
+                            continue
+                else:
+                    final_path = original_path
+                task_copy = task.copy()
+                task_copy['out_path'] = final_path
+                resolved_items.append((task_copy, original_idx))
+            return resolved_items
+        
+        return resolved_items
+
+    def _ask_duplicate_action(self, path):
+        dlg = Toplevel(self)
+        dlg.withdraw()
+        dlg.title("文件已存在")
+        dlg.transient(self)
+        dlg.grab_set()
+        dlg.geometry("500x200")
+        dlg.update_idletasks()
+        x = self.winfo_x() + (self.winfo_width() - dlg.winfo_width()) // 2
+        y = self.winfo_y() + (self.winfo_height() - dlg.winfo_height()) // 2
+        dlg.geometry(f"+{x}+{y}")
+        dlg.deiconify()
+        dlg.lift()
+        dlg.focus_force()
+        label = ttk.Label(dlg, text=f"输出文件已存在：\n{path}\n\n请选择操作：")
+        label.pack(pady=15)
+        result = ["overwrite"]
+        def set_result(value):
+            result[0] = value
+            dlg.destroy()
+        frame1 = ttk.Frame(dlg)
+        frame1.pack(pady=5)
+        ttk.Button(frame1, text="覆盖", width=12, command=lambda: set_result("overwrite")).pack(side=tk.LEFT, padx=8)
+        ttk.Button(frame1, text="自动重命名", width=12, command=lambda: set_result("rename")).pack(side=tk.LEFT, padx=8)
+        ttk.Button(frame1, text="跳过此文件", width=12, command=lambda: set_result("skip")).pack(side=tk.LEFT, padx=8)
+        ttk.Separator(dlg, orient='horizontal').pack(fill=tk.X, pady=10, padx=20)
+        frame2 = ttk.Frame(dlg)
+        frame2.pack(pady=5)
+        ttk.Button(frame2, text="全部覆盖", width=12, command=lambda: set_result("apply_overwrite")).pack(side=tk.LEFT, padx=8)
+        ttk.Button(frame2, text="全部重命名", width=12, command=lambda: set_result("apply_rename")).pack(side=tk.LEFT, padx=8)
+        ttk.Button(frame2, text="全部跳过", width=12, command=lambda: set_result("apply_skip")).pack(side=tk.LEFT, padx=8)
+        self.wait_window(dlg)
+        return result[0]
+
+    def _auto_rename_path(self, path):
+        return self._get_unique_filename(path, "自动重命名")
+
+    # ---------- 界面构建 ----------
     def create_widgets(self):
         left_frame = ttk.Frame(self)
-        left_frame.pack(side=tk.LEFT, fill=tk.BOTH, expand=True, padx=5, pady=5)
-    
-        right_frame = ttk.Frame(self, width=350, height=400)
-        right_frame.pack(side=tk.RIGHT, fill=tk.BOTH, padx=5, pady=5)
-        right_frame.pack_propagate(False)
-    
-        # ========== 输入与输出（一行布局） ==========
+        left_frame.pack(side=tk.TOP, fill=tk.BOTH, expand=True, padx=5, pady=5)
+
         io_frame = ttk.LabelFrame(left_frame, text="输入与输出")
         io_frame.pack(fill=tk.X, pady=5)
-    
         io_row = ttk.Frame(io_frame)
         io_row.pack(fill=tk.X, padx=5, pady=5)
-    
-        # 添加图片按钮（支持多选）
         self.add_files_btn = ttk.Button(io_row, text="添加图片", command=self.add_files)
         self.add_files_btn.pack(side=tk.LEFT, padx=2)
-    
-        # 遍历文件夹按钮（递归）
         self.add_folder_btn = ttk.Button(io_row, text="遍历文件夹", command=self.add_folders)
         self.add_folder_btn.pack(side=tk.LEFT, padx=2)
-    
         ttk.Label(io_row, text="输出目录:").pack(side=tk.LEFT, padx=(10,2))
-    
         self.output_dir_entry = ttk.Entry(io_row, textvariable=self.output_dir, width=40)
         self.output_dir_entry.pack(side=tk.LEFT, padx=2, fill=tk.X, expand=True)
-    
         self.browse_btn = ttk.Button(io_row, text="浏览", command=self.select_output_dir)
         self.browse_btn.pack(side=tk.LEFT, padx=2)
-    
-        # ========== 当前模板框架 ==========
-        self.template_frame = ttk.LabelFrame(left_frame, text="当前模板（新任务将使用此设置）")
-        self.template_frame.pack(fill=tk.X, pady=5)
-    
-        # 第一行：格式、质量、旋转
-        row1 = ttk.Frame(self.template_frame)
-        row1.pack(fill=tk.X, pady=2)
-        ttk.Label(row1, text="格式:").pack(side=tk.LEFT, padx=2)
-        self.format_var = tk.StringVar(value="JPEG")
-        format_combo = ttk.Combobox(row1, textvariable=self.format_var,
-                                    values=["JPEG", "PNG", "WEBP"], state="readonly", width=6)
-        format_combo.pack(side=tk.LEFT, padx=2)
-        format_combo.bind("<<ComboboxSelected>>", self.update_template_preview)
-    
-        ttk.Label(row1, text="质量:").pack(side=tk.LEFT, padx=(10,2))
-        self.quality_var = tk.IntVar(value=85)
-        quality_scale = ttk.Scale(row1, from_=1, to=100, variable=self.quality_var,
-                                  orient=tk.HORIZONTAL, length=100)
-        quality_scale.pack(side=tk.LEFT, padx=2)
-        self.quality_label = ttk.Label(row1, text="85", width=3)
-        self.quality_label.pack(side=tk.LEFT, padx=2)
-        self.quality_var.trace_add("write", lambda *a: self.quality_label.config(text=str(self.quality_var.get())))
-    
-        ttk.Label(row1, text="旋转:").pack(side=tk.LEFT, padx=(10,2))
-        self.rotation_var = tk.StringVar(value="0°")
-        rot_frame = ttk.Frame(row1)
-        rot_frame.pack(side=tk.LEFT, padx=2)
-        ttk.Radiobutton(rot_frame, text="无", variable=self.rotation_var, value="0°",
-                        command=self.update_template_preview).pack(side=tk.LEFT, padx=2)
-        ttk.Radiobutton(rot_frame, text="左90", variable=self.rotation_var, value="90°",
-                        command=self.update_template_preview).pack(side=tk.LEFT, padx=2)
-        ttk.Radiobutton(rot_frame, text="右90", variable=self.rotation_var, value="-90°",
-                        command=self.update_template_preview).pack(side=tk.LEFT, padx=2)
-        ttk.Radiobutton(rot_frame, text="180", variable=self.rotation_var, value="180°",
-                        command=self.update_template_preview).pack(side=tk.LEFT, padx=2)
-    
-        self.h_flip_var = tk.BooleanVar(value=False)
-        self.v_flip_var = tk.BooleanVar(value=False)
-        ttk.Checkbutton(row1, text="水平翻转", variable=self.h_flip_var, command=self.update_template_preview).pack(side=tk.LEFT, padx=5)
-        ttk.Checkbutton(row1, text="垂直翻转", variable=self.v_flip_var, command=self.update_template_preview).pack(side=tk.LEFT, padx=5)
-    
-        # 第二行：尺寸调整 + 保留EXIF
-        row2 = ttk.Frame(self.template_frame)
-        row2.pack(fill=tk.X, pady=2)
-        ttk.Label(row2, text="尺寸调整:").pack(side=tk.LEFT, padx=2)
-        self.resize_mode_var = tk.StringVar(value="无调整")
-        mode_combo = ttk.Combobox(row2, textvariable=self.resize_mode_var,
-                                  values=["无调整", "精确 (WxH)", "限制长边", "限制短边"],
-                                  state="readonly", width=12)
-        mode_combo.pack(side=tk.LEFT, padx=2)
-        mode_combo.bind("<<ComboboxSelected>>", self.on_resize_mode_changed)   # 统一回调
-    
-        # 宽/长边/短边 标签（动态变化）
-        self.width_label = ttk.Label(row2, text="宽:")
-        self.width_label.pack(side=tk.LEFT, padx=(10,2))
-        self.resize_width_var = tk.IntVar(value=800)
-        self.resize_width_spinbox = ttk.Spinbox(row2, from_=1, to=9999, textvariable=self.resize_width_var, width=6)
-        self.resize_width_spinbox.pack(side=tk.LEFT, padx=2)
-    
-        # 高度标签和输入框（在限制长边/短边模式下禁用）
 
-        ttk.Label(row2, text="高:").pack(side=tk.LEFT, padx=(5,2))
-        self.resize_height_var = tk.IntVar(value=600)
-        self.resize_height_spinbox = ttk.Spinbox(row2, from_=1, to=9999, textvariable=self.resize_height_var, width=6)
-        self.resize_height_spinbox.pack(side=tk.LEFT, padx=2)
-    
-        # 保留EXIF
-        ttk.Label(row2, text="保留EXIF:").pack(side=tk.LEFT, padx=(20, 2))
-        self.keep_exif_var = tk.BooleanVar(value=self.keep_exif)
-        ttk.Checkbutton(row2, variable=self.keep_exif_var).pack(side=tk.LEFT)
-    
-        # 第三行：裁剪设置
-        row3 = ttk.Frame(self.template_frame)
-        row3.pack(fill=tk.X, pady=2)
-        self.crop_enabled_var = tk.BooleanVar(value=False)
-        ttk.Checkbutton(row3, text="启用裁剪", variable=self.crop_enabled_var,
-                        command=self.update_template_preview).pack(side=tk.LEFT, padx=2)
-        ttk.Label(row3, text="x:").pack(side=tk.LEFT, padx=(5,0))
-        self.crop_x_var = tk.StringVar(value="0")
-        ttk.Entry(row3, textvariable=self.crop_x_var, width=5).pack(side=tk.LEFT, padx=2)
-        ttk.Label(row3, text="y:").pack(side=tk.LEFT)
-        self.crop_y_var = tk.StringVar(value="0")
-        ttk.Entry(row3, textvariable=self.crop_y_var, width=5).pack(side=tk.LEFT, padx=2)
-        ttk.Label(row3, text="w:").pack(side=tk.LEFT)
-        self.crop_w_var = tk.StringVar(value="iw")
-        ttk.Entry(row3, textvariable=self.crop_w_var, width=6).pack(side=tk.LEFT, padx=2)
-        ttk.Label(row3, text="h:").pack(side=tk.LEFT)
-        self.crop_h_var = tk.StringVar(value="ih")
-        ttk.Entry(row3, textvariable=self.crop_h_var, width=6).pack(side=tk.LEFT, padx=2)
-        ttk.Label(row3, text="(支持 iw, ih, 四则运算)", foreground="gray").pack(side=tk.LEFT, padx=5)
-    
-        # 第四行：输出名称模板 + 重名处理 + 预设
-        row4 = ttk.Frame(self.template_frame)
-        row4.pack(fill=tk.X, pady=5)
+        # 模板容器（包含所有参数控件）
+        self.template_container = ttk.LabelFrame(left_frame, text="当前模板（新任务将使用此设置）- 处理顺序: 旋转→翻转→缩放→裁剪→更多")
+        self.template_container.pack(fill=tk.X, pady=5)
+
+        # 图像参数编辑器
+        self.template_editor = TemplateEditor(self.template_container, include_exif_date_delete=True, default_expanded=False)
+        self.template_editor.pack(fill=tk.X, padx=5, pady=5)
+        self.template_editor.bind_preview_callback(self.update_template_preview)
+
+        # 输出名称模板、重名处理、预设（同一行）
+        row4 = ttk.Frame(self.template_container)
+        row4.pack(fill=tk.X, pady=5, padx=5)
+        
         ttk.Label(row4, text="输出名称模板:").pack(side=tk.LEFT, padx=2)
         self.name_template_var = tk.StringVar(value="{Filename}")
         template_combo = ttk.Combobox(row4, textvariable=self.name_template_var,
-                                      values=["{Filename}", "{Folder name}{Filename}"],
-                                      state="readonly", width=22)
+                                      values=["{Filename}", "{Folder name}{Filename}", "{Original}/{Filename}", "{Folder name}_{Filename}", "{Original}/123/{Filename}"],
+                                      width=23)
         template_combo.pack(side=tk.LEFT, padx=2)
-        template_combo.bind("<<ComboboxSelected>>", self.update_template_preview)
-    
         ttk.Label(row4, text="重名处理:").pack(side=tk.LEFT, padx=(10,2))
-        self.duplicate_mode = tk.StringVar(value="覆盖")
-        dup_combo = ttk.Combobox(row4, textvariable=self.duplicate_mode,
-                                 values=["覆盖", "自动重命名"], state="readonly", width=10)
+        self.duplicate_mode_var = tk.StringVar(value="覆盖")
+        dup_combo = ttk.Combobox(row4, textvariable=self.duplicate_mode_var,
+                                 values=["覆盖", "自动重命名", "询问", "跳过"], state="readonly", width=10)
         dup_combo.pack(side=tk.LEFT, padx=2)
-    
+        # 预设
         ttk.Label(row4, text="预设:").pack(side=tk.LEFT, padx=(10,2))
-        self.preset_combo = ttk.Combobox(row4, state="readonly", width=18)
+        self.preset_combo = ttk.Combobox(row4, state="readonly", width=16)
         self.preset_combo.pack(side=tk.LEFT, padx=2)
-        self.preset_combo.bind("<<ComboboxSelected>>", self.on_preset_selected)
-    
-        self.load_preset_btn = ttk.Button(row4, text="加载预设", command=self.load_preset)
+        self.load_preset_btn = ttk.Button(row4, text="加载", command=self.load_preset, width=6)
         self.load_preset_btn.pack(side=tk.LEFT, padx=2)
-        self.save_preset_btn = ttk.Button(row4, text="保存预设", command=self.save_preset)
+        self.save_preset_btn = ttk.Button(row4, text="保存", command=self.save_preset, width=6)
         self.save_preset_btn.pack(side=tk.LEFT, padx=2)
-    
-        # 模板预览文字
-        self.template_preview_label = ttk.Label(self.template_frame, text="", relief="sunken")
-        self.template_preview_label.pack(fill=tk.X, pady=5)
-        self.update_template_preview()
-    
+        self.delete_preset_btn = ttk.Button(row4, text="删除", command=self.delete_preset, width=6)
+        self.delete_preset_btn.pack(side=tk.LEFT, padx=2)
+
+        # 模板预览标签
+        self.template_preview_label = ttk.Label(self.template_container, text="", relief="sunken")
+        self.template_preview_label.pack(fill=tk.X, pady=5, padx=5)
+        self.update_template_preview(self.template_editor.get_settings())
+
         # 任务列表
-        list_frame = ttk.LabelFrame(left_frame, text="转换任务（右键可编辑）")
+        list_frame = ttk.LabelFrame(left_frame, text="转换任务（单击预览，右键编辑）")
         list_frame.pack(fill=tk.BOTH, expand=True, pady=5)
-    
         self.task_listbox = tk.Listbox(list_frame, selectmode=tk.EXTENDED, height=12)
         scrollbar = ttk.Scrollbar(list_frame, orient=tk.VERTICAL, command=self.task_listbox.yview)
         self.task_listbox.configure(yscrollcommand=scrollbar.set)
         self.task_listbox.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
         scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
-    
         self.task_listbox.bind("<Button-3>", self.show_context_menu)
         self.task_listbox.bind("<<ListboxSelect>>", self.on_task_select)
-    
+
         # 进度条
         progress_frame = ttk.Frame(left_frame)
         progress_frame.pack(fill=tk.X, pady=5)
@@ -413,11 +1135,10 @@ class ImageConverter(TkinterDnD.Tk):
         self.progress_bar.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=5)
         self.progress_label = ttk.Label(progress_frame, text="就绪")
         self.progress_label.pack(side=tk.RIGHT, padx=5)
-    
-        # 操作按钮
+
+        # 按钮区
         btn_frame = ttk.Frame(left_frame)
         btn_frame.pack(fill=tk.X, pady=5)
-    
         self.start_btn = ttk.Button(btn_frame, text="开始转换", command=self.start_convert)
         self.start_btn.pack(side=tk.LEFT, padx=5)
         self.undo_btn = ttk.Button(btn_frame, text="撤销", command=self.undo)
@@ -428,70 +1149,81 @@ class ImageConverter(TkinterDnD.Tk):
         self.remove_btn.pack(side=tk.LEFT, padx=5)
         self.clear_btn = ttk.Button(btn_frame, text="清空所有", command=self.clear_tasks)
         self.clear_btn.pack(side=tk.LEFT, padx=5)
-    
         ttk.Label(btn_frame, text="线程数:").pack(side=tk.LEFT, padx=(10,2))
         cpu_count = os.cpu_count() or 4
         self.thread_count_var = tk.IntVar(value=self.default_threads)
         thread_spin = ttk.Spinbox(btn_frame, from_=1, to=cpu_count, textvariable=self.thread_count_var, width=5)
         thread_spin.pack(side=tk.LEFT, padx=2)
         ttk.Label(btn_frame, text=f"(最大{cpu_count})").pack(side=tk.LEFT, padx=2)
-    
-        # 右侧预览
-        ttk.Label(right_frame, text="预览（点击任务查看效果）", font=("Arial", 10, "bold")).pack(pady=5)
-        self.preview_canvas = tk.Canvas(right_frame, bg='gray', relief=tk.SUNKEN)
-        self.preview_canvas.pack(fill=tk.BOTH, expand=True, padx=5, pady=5)
-        self.current_preview_img = None
-    
-        # 初始化时根据当前模式调整一次界面状态
-        self.on_resize_mode_changed()
 
+        # 同步全局变量
+        self.keep_exif_var = self.template_editor.keep_exif_var
+        self.preserve_date_var = self.template_editor.preserve_date_var
+        self.delete_original_var = self.template_editor.delete_original_var
+        # 同步从配置文件加载的初始值到界面控件
+        self.preserve_date_var.set(self.preserve_original_date)
+        self.keep_exif_var.set(self.keep_exif)
+        self.delete_original_var.set(self.delete_original)
 
-    def _apply_resize_mode_ui(self, mode, width_label, height_spinbox):
-        """根据尺寸调整模式更新标签文本和高度输入框状态"""
-        if mode == "限制长边":
-            width_label.config(text="长边:")
-            height_spinbox.config(state=tk.DISABLED)
+    def update_template_preview(self, settings=None):
+        if settings is None:
+            settings = self.template_editor.get_settings()
+        fmt = settings['format']
+        qual = settings['quality']
+        rot = settings['rotation']
+        rot_display = {"0°":"无", "90°":"左90", "-90°":"右90", "180°":"180"}.get(rot, rot)
+        flip = []
+        if settings['h_flip']: flip.append("水平")
+        if settings['v_flip']: flip.append("垂直")
+        flip_str = " | ".join(flip) if flip else "无翻转"
+        mode = settings['resize_mode']
+        size_info = ""
+        if mode == "精确 (WxH)":
+            size_info = f" | 尺寸: {settings['resize_w']}x{settings['resize_h']} (精确)"
+        elif mode == "限制长边":
+            size_info = f" | 长边: {settings['resize_w']}px"
         elif mode == "限制短边":
-            width_label.config(text="短边:")
-            height_spinbox.config(state=tk.DISABLED)
-        else:  # "无调整" 或 "精确 (WxH)"
-            width_label.config(text="宽:")
-            height_spinbox.config(state=tk.NORMAL)
-    
-    def on_resize_mode_changed(self, event=None):
-        mode = self.resize_mode_var.get()
-        self._apply_resize_mode_ui(mode, self.width_label, self.resize_height_spinbox)
-        self.update_template_preview()
+            size_info = f" | 短边: {settings['resize_w']}px"
+        else:
+            size_info = " | 不调整尺寸"
+        crop_info = ""
+        if settings.get('crop_enabled', False):
+            crop_info = f" | 裁剪: x={settings['crop_x']} y={settings['crop_y']} w={settings['crop_w']} h={settings['crop_h']}"
+        template = self.name_template_var.get()
+        example_out = "image"
+        if template == "{Folder name}{Filename}":
+            example_out = "folderimage"
+        self.template_preview_label.config(
+            text=f"模板: {fmt} | Q{qual} | {rot_display} | {flip_str}{size_info}{crop_info} | 输出示例: {example_out}.{fmt.lower()}"
+        )
 
-
-
-    # ========== 新增：添加图片/文件夹的方法 ==========
+    # ---------- 添加图片/文件夹 ----------
     def add_files(self):
-        """通过文件对话框添加图片文件"""
         if self.converting:
             messagebox.showwarning("警告", "转换进行中，无法添加新任务")
             return
         file_paths = filedialog.askopenfilenames(
             title="选择图片文件",
-            filetypes=[("图片文件", "*.jpg *.jpeg *.png *.webp *.bmp"), ("所有文件", "*.*")]
+            filetypes=[
+                ("所有支持的图片", " ".join(f"*{ext}" for ext in SUPPORTED_IMG_EXTS)),
+                ("所有文件", "*.*")
+            ]
         )
         if not file_paths:
             return
         self._add_image_paths(file_paths)
 
     def add_folders(self):
-        """通过文件夹对话框添加文件夹（递归查找图片）"""
         if self.converting:
             messagebox.showwarning("警告", "转换进行中，无法添加新任务")
             return
         folder = filedialog.askdirectory(title="选择包含图片的文件夹")
         if not folder:
             return
-        # 递归查找图片文件
         image_files = []
         for root, dirs, files in os.walk(folder):
             for f in files:
-                if os.path.splitext(f)[1].lower() in ['.jpg','.jpeg','.png','.webp','.bmp']:
+                if os.path.splitext(f)[1].lower() in SUPPORTED_IMG_EXTS:
                     image_files.append(os.path.join(root, f))
         if not image_files:
             messagebox.showinfo("提示", "所选文件夹中没有找到支持的图片")
@@ -499,25 +1231,9 @@ class ImageConverter(TkinterDnD.Tk):
         self._add_image_paths(image_files)
 
     def _add_image_paths(self, paths):
-        """统一添加图片路径列表到任务列表，使用当前模板参数"""
-        current = {
-            'format': self.format_var.get(),
-            'quality': self.quality_var.get(),
-            'rotation': self.rotation_var.get(),
-            'h_flip': self.h_flip_var.get(),
-            'v_flip': self.v_flip_var.get(),
-            'resize_mode': self.resize_mode_var.get(),
-            'resize_w': self.resize_width_var.get(),
-            'resize_h': self.resize_height_var.get(),
-            'name_template': self.name_template_var.get(),
-            'crop_enabled': self.crop_enabled_var.get(),
-            'crop_x': self.crop_x_var.get(),
-            'crop_y': self.crop_y_var.get(),
-            'crop_w': self.crop_w_var.get(),
-            'crop_h': self.crop_h_var.get(),
-            'duplicate_mode': self.duplicate_mode.get(),
-            'keep_exif': self.keep_exif_var.get()
-        }
+        current = self.template_editor.get_settings()
+        current['name_template'] = self.name_template_var.get()
+        current['duplicate_mode'] = self.duplicate_mode_var.get()
         added = 0
         for fp in paths:
             task = {'path': fp, **current}
@@ -527,7 +1243,7 @@ class ImageConverter(TkinterDnD.Tk):
         if added > 0:
             self.save_current_state_to_history()
 
-    # ========== 右键菜单 ==========
+    # ---------- 右键菜单 ----------
     def show_context_menu(self, event):
         index = self.task_listbox.nearest(event.y)
         if index >= 0:
@@ -543,12 +1259,11 @@ class ImageConverter(TkinterDnD.Tk):
         if not selection:
             messagebox.showinfo("提示", "请先选中一个任务")
             return
-        idx = selection[0]
-        if idx < 0 or idx >= len(self.tasks):
-            return
-        self.edit_task_dialog(idx, self.tasks[idx])
+        first_idx = selection[0]
+        first_task = self.tasks[first_idx]
+        self.edit_task_dialog(first_idx, first_task, selected_indices=selection)
 
-    # ========== 辅助函数 ==========
+    # ---------- 辅助函数 ----------
     def get_task_display_text(self, task):
         filename = os.path.basename(task['path'])
         out_name = self.build_output_name(task['name_template'], task['path'])
@@ -578,44 +1293,17 @@ class ImageConverter(TkinterDnD.Tk):
         if task.get('crop_enabled', False):
             crop_str = f" 裁剪:{task['crop_x']},{task['crop_y']},{task['crop_w']},{task['crop_h']}"
         param_str = f"[{task['format']} Q{task['quality']} {rot_display} {flip} {size}{crop_str}]"
+        if task.get('delete_original', False):
+            param_str = param_str[:-1] + " 删]"
         return f"{filename} → {out_full} {param_str}"
 
     def select_output_dir(self):
         d = filedialog.askdirectory(initialdir=self.output_dir.get())
         if d:
-            self.output_dir.set(d)
+            self.output_dir.set(os.path.normpath(d))
             self.save_settings_and_presets()
 
-    def update_template_preview(self, event=None):
-        fmt = self.format_var.get()
-        qual = self.quality_var.get()
-        rot = self.rotation_var.get()
-        flip = []
-        if self.h_flip_var.get(): flip.append("水平")
-        if self.v_flip_var.get(): flip.append("垂直")
-        flip_str = " | ".join(flip) if flip else "无翻转"
-        mode = self.resize_mode_var.get()
-        size_info = ""
-        if mode == "精确 (WxH)":
-            size_info = f" | 尺寸: {self.resize_width_var.get()}x{self.resize_height_var.get()} (精确)"
-        elif mode == "限制长边":
-            size_info = f" | 长边: {self.resize_width_var.get()}px"
-        elif mode == "限制短边":
-            size_info = f" | 短边: {self.resize_width_var.get()}px"
-        else:
-            size_info = " | 不调整尺寸"
-        crop_info = ""
-        if self.crop_enabled_var.get():
-            crop_info = f" | 裁剪: x={self.crop_x_var.get()} y={self.crop_y_var.get()} w={self.crop_w_var.get()} h={self.crop_h_var.get()}"
-        template = self.name_template_var.get()
-        example_out = "image"
-        if template == "{Folder name}{Filename}":
-            example_out = "folderimage"
-        self.template_preview_label.config(
-            text=f"模板: {fmt} | Q{qual} | {rot} | {flip_str}{size_info}{crop_info} | 输出示例: {example_out}.{fmt.lower()}"
-        )
-
-    def apply_resize(self, img, mode, param_w, param_h):
+    def apply_resize(self, img, mode, param_w, param_h, resample=Image.LANCZOS):
         if mode == "无调整":
             return img
         orig_w, orig_h = img.size
@@ -641,232 +1329,331 @@ class ImageConverter(TkinterDnD.Tk):
             return img
         if new_w <= 0 or new_h <= 0:
             return img
-        return img.resize((new_w, new_h), Image.LANCZOS)
+        return img.resize((new_w, new_h), resample)
 
     def build_output_name(self, template, file_path):
-        dirname = os.path.dirname(file_path)
-        folder_name = os.path.basename(dirname)
-        base_name = os.path.splitext(os.path.basename(file_path))[0]
-        if template == "{Filename}":
-            return base_name
-        elif template == "{Folder name}{Filename}":
-            return folder_name + base_name
-        else:
-            return base_name
+        """
+        根据模板生成输出文件名（或包含路径的文件名）。
+    
+        模板占位符：
+            {Filename}   - 原文件名（不含扩展名）
+            {Folder name} - 原文件所在文件夹的名称（最后一级目录名）
+            {Original}    - 原文件所在目录的完整绝对路径
+    
+        如果模板中包含 {Original}，则返回完整的输出路径（目录+文件名，不含扩展名），
+        否则仅返回文件名（不含扩展名和目录）。
+    
+        参数：
+            template (str): 输出名称模板，例如 "{Original}/resized/{Filename}"
+            file_path (str): 原文件的完整路径
+    
+        返回：
+            str: 生成的输出名称（不含扩展名），或完整输出路径（不含扩展名）
+        """
+        dirname = os.path.dirname(file_path)          # 原文件所在目录
+        folder_name = os.path.basename(dirname)       # 最后一级目录名
+        base_name = os.path.splitext(os.path.basename(file_path))[0]  # 文件名无扩展名
+    
+        # 依次替换占位符
+        result = template
+        result = result.replace("{Filename}", base_name)
+        result = result.replace("{Folder name}", folder_name)
+        result = result.replace("{Original}", dirname)
+    
+        # 规范化路径（处理多余的斜杠或反斜杠）
+        result = os.path.normpath(result)
+    
+        # 如果模板中使用了 {Original}，则 result 已经是完整路径的一部分（可能还包含文件名）
+        # 注意：此时不添加扩展名，扩展名会在调用方（如 resolve_duplicate_paths 或 _convert_single）中附加
+        return result
 
-    # ========== 拖放文件夹支持 ==========
+    # ---------- 拖放文件夹支持 ----------
     def on_drop(self, event):
-        if not DND_AVAILABLE:
-            return
         if self.converting:
             messagebox.showwarning("警告", "转换进行中，无法添加新任务")
             return
-        files = self._parse_dropped_files(event.data)
-        image_files = []
+    
+        raw_data = event.data.strip()
+        if not raw_data:
+            return
+    
+        # ----- 解析拖拽数据（轻量操作，仍可在主线程）-----
+        files = []
+        if DND_AVAILABLE and hasattr(self, 'tk'):
+            try:
+                files = self.tk.splitlist(raw_data)
+                if len(files) < 5 and len(raw_data) > 500:
+                    files = []
+            except Exception:
+                files = []
+    
+        if not files:
+            import re
+            matches = re.findall(r'\{(.*?)\}', raw_data)
+            if matches:
+                files = [m.strip() for m in matches if m.strip()]
+            else:
+                files = [p.strip('{}') for p in raw_data.split() if p.strip()]
+    
+        cleaned = []
         for fp in files:
-            fp = fp.strip('{}')
-            if os.path.isdir(fp):
-                for root, dirs, filenames in os.walk(fp):
-                    for f in filenames:
-                        if os.path.splitext(f)[1].lower() in ['.jpg','.jpeg','.png','.webp','.bmp']:
-                            image_files.append(os.path.join(root, f))
-            elif os.path.isfile(fp) and os.path.splitext(fp)[1].lower() in ['.jpg','.jpeg','.png','.webp','.bmp']:
-                image_files.append(fp)
+            fp = fp.strip()
+            if not fp:
+                continue
+            if fp.startswith('\\\\?\\'):
+                fp = fp[4:]
+            cleaned.append(fp)
+    
+        # 如果没有任何有效路径，直接返回
+        if not cleaned:
+            messagebox.showinfo("提示", "未检测到有效的文件或文件夹")
+            return
+    
+        # ----- 后台遍历文件夹 -----
+        # 先禁用拖拽相关操作，避免重复添加
+        self.drop_target_unregister() if DND_AVAILABLE else None
+        # 显示一个简单的提示标签（可选）
+        self.progress_label.config(text="正在扫描文件夹，请稍候...")
+        self.update_idletasks()
+    
+        # 启动后台线程
+        def scan_folders():
+            image_files = []
+            for fp in cleaned:
+                if os.path.isdir(fp):
+                    for root, dirs, filenames in os.walk(fp):
+                        for f in filenames:
+                            if os.path.splitext(f)[1].lower() in SUPPORTED_IMG_EXTS:
+                                image_files.append(os.path.join(root, f))
+                elif os.path.isfile(fp) and os.path.splitext(fp)[1].lower() in SUPPORTED_IMG_EXTS:
+                    image_files.append(fp)
+            # 扫描完成后，通过 after 回到主线程处理
+            self.after(0, lambda: self._on_drop_scan_complete(cleaned, image_files))
+    
+        threading.Thread(target=scan_folders, daemon=True).start()
+    
+    def _on_drop_scan_complete(self, cleaned, image_files):
+        # 恢复拖拽注册
+        if DND_AVAILABLE:
+            self.drop_target_register(DND_FILES)
+            self.dnd_bind('<<Drop>>', self.on_drop)
+    
         if not image_files:
+            self.progress_label.config(text="就绪")
             messagebox.showinfo("提示", "未检测到支持的图片")
             return
+    
+        # 解析统计提示（帮助用户发现异常）
+        if len(cleaned) != len(image_files):
+            diff = len(cleaned) - len(image_files)
+            messagebox.showwarning("注意",
+                f"拖拽解析到 {len(cleaned)} 个文件/文件夹，\n"
+                f"其中包含 {len(image_files)} 张图片。\n"
+                f"如果数量明显少于预期，可能是因为系统拖拽数据被截断。\n"
+                f"建议分批拖拽或使用“添加图片”按钮。")
+        else:
+            if len(image_files) > 200:
+                if not messagebox.askyesno("确认添加",
+                    f"即将添加 {len(image_files)} 个任务，是否继续？"):
+                    self.progress_label.config(text="就绪")
+                    return
+    
         self._add_image_paths(image_files)
+        self.progress_label.config(text="就绪")
+    
 
-    def _parse_dropped_files(self, data):
-        data = data.strip()
-        if not data:
-            return []
-        if data.startswith('{') and data.endswith('}'):
-            return [p.strip() for p in data[1:-1].split('} {')]
-        return data.split()
 
-    def on_task_select(self, event):
-        sel = self.task_listbox.curselection()
-        if len(sel) == 1:
-            self.preview_image(self.tasks[sel[0]])
-
-    # ========== 预览（内存泄漏修复） ==========
-    def preview_image(self, task):
-        if self.current_preview_img:
-            del self.current_preview_img
-        self.current_preview_img = None
-        try:
-            img = Image.open(task['path'])
-            angle = int(task['rotation'].rstrip('°'))
-            if angle != 0:
-                img = img.rotate(angle, expand=True, resample=Image.NEAREST)
-            if task['h_flip']:
-                img = img.transpose(Image.FLIP_LEFT_RIGHT)
-            if task['v_flip']:
-                img = img.transpose(Image.FLIP_TOP_BOTTOM)
-            if task['resize_mode'] != "无调整":
-                img = self.apply_resize(img, task['resize_mode'], task['resize_w'], task['resize_h'])
-            if task.get('crop_enabled', False):
-                w_cur, h_cur = img.size
-                x = self.eval_crop_expr(task['crop_x'], w_cur, h_cur)
-                y = self.eval_crop_expr(task['crop_y'], w_cur, h_cur)
-                w = self.eval_crop_expr(task['crop_w'], w_cur, h_cur)
-                h = self.eval_crop_expr(task['crop_h'], w_cur, h_cur)
-                x = max(0, min(x, w_cur-1))
-                y = max(0, min(y, h_cur-1))
-                w = min(w, w_cur - x)
-                h = min(h, h_cur - y)
-                if w > 0 and h > 0:
-                    img = img.crop((x, y, x+w, y+h))
-            cw = max(1, self.preview_canvas.winfo_width())
-            ch = max(1, self.preview_canvas.winfo_height())
-            img.thumbnail((cw, ch), Image.NEAREST)
-            photo = ImageTk.PhotoImage(img)
-            self.current_preview_img = photo
-            self.preview_canvas.delete("all")
-            self.preview_canvas.create_image(cw//2, ch//2, image=photo, anchor=tk.CENTER)
-        except Exception as e:
-            self.preview_canvas.delete("all")
-            self.preview_canvas.create_text(10, 10, anchor=tk.NW, text=f"预览失败: {e}", fill="red")
-
-    # ========== 编辑任务对话框 ==========
-    def edit_task_dialog(self, idx, task):
+    # ---------- 编辑任务对话框 ----------
+    def edit_task_dialog(self, idx, task, selected_indices=None):
         dlg = Toplevel(self)
+        dlg.withdraw()
         dlg.title("编辑任务参数")
         dlg.transient(self)
         dlg.grab_set()
-        dlg.lift()
-        dlg.focus_force()
-        dlg.geometry("540x280")
+        dlg.geometry("1000x400")  # 增大窗口以容纳预览
         dlg.update_idletasks()
         x = self.winfo_x() + (self.winfo_width() - dlg.winfo_width()) // 2
         y = self.winfo_y() + (self.winfo_height() - dlg.winfo_height()) // 2
         dlg.geometry(f"+{x}+{y}")
-
-        # 第一行：格式+质量
-        row1 = ttk.Frame(dlg)
-        row1.pack(fill=tk.X, pady=5, padx=10)
-        ttk.Label(row1, text="目标格式:").pack(side=tk.LEFT, padx=5)
-        fmt_var = tk.StringVar(value=task['format'])
-        fmt_combo = ttk.Combobox(row1, textvariable=fmt_var, values=["JPEG","PNG","WEBP"], state="readonly", width=8)
-        fmt_combo.pack(side=tk.LEFT, padx=5)
-        ttk.Label(row1, text="质量:").pack(side=tk.LEFT, padx=(15,5))
-        qual_var = tk.IntVar(value=task['quality'])
-        qual_scale = ttk.Scale(row1, from_=1, to=100, variable=qual_var, orient=tk.HORIZONTAL, length=150)
-        qual_scale.pack(side=tk.LEFT, padx=5)
-        qual_label = ttk.Label(row1, text=str(task['quality']), width=3)
-        qual_label.pack(side=tk.LEFT)
-        qual_var.trace_add("write", lambda *a: qual_label.config(text=str(qual_var.get())))
-
-        # 第二行：旋转+翻转
-        row2 = ttk.Frame(dlg)
-        row2.pack(fill=tk.X, pady=5, padx=10)
-        ttk.Label(row2, text="旋转:").pack(side=tk.LEFT, padx=5)
-        rot_var = tk.StringVar(value=task['rotation'])
-        rot_frame = ttk.Frame(row2)
-        rot_frame.pack(side=tk.LEFT)
-        for text, val in [("无", "0°"), ("左90", "90°"), ("右90", "-90°"), ("180", "180°")]:
-            ttk.Radiobutton(rot_frame, text=text, variable=rot_var, value=val).pack(side=tk.LEFT, padx=2)
-        ttk.Label(row2, text="翻转:").pack(side=tk.LEFT, padx=(20,5))
-        h_var = tk.BooleanVar(value=task['h_flip'])
-        v_var = tk.BooleanVar(value=task['v_flip'])
-        ttk.Checkbutton(row2, text="水平", variable=h_var).pack(side=tk.LEFT, padx=3)
-        ttk.Checkbutton(row2, text="垂直", variable=v_var).pack(side=tk.LEFT, padx=3)
-
-        # 第三行：尺寸调整
-        row3 = ttk.Frame(dlg)
-        row3.pack(fill=tk.X, pady=5, padx=10)
-        ttk.Label(row3, text="尺寸调整模式:").pack(side=tk.LEFT, padx=5)
-        mode_var = tk.StringVar(value=task['resize_mode'])
-        mode_combo = ttk.Combobox(row3, textvariable=mode_var,
-                                  values=["无调整", "精确 (WxH)", "限制长边", "限制短边"],
-                                  state="readonly", width=14)
-        mode_combo.pack(side=tk.LEFT, padx=5)
-        
-        width_label_edit = ttk.Label(row3, text="宽:")
-        width_label_edit.pack(side=tk.LEFT, padx=(5,2))
-        w_var = tk.IntVar(value=task['resize_w'])
-        w_spin = ttk.Spinbox(row3, from_=1, to=9999, textvariable=w_var, width=6)
-        w_spin.pack(side=tk.LEFT, padx=2)
-        
-        ttk.Label(row3, text="高:").pack(side=tk.LEFT, padx=(5,2))
-        h_var2 = tk.IntVar(value=task['resize_h'])
-        h_spin = ttk.Spinbox(row3, from_=1, to=9999, textvariable=h_var2, width=6)
-        h_spin.pack(side=tk.LEFT, padx=2)
-        
-        # 绑定模式切换事件，复用公共函数
-        def update_edit_ui(*args):
-            self._apply_resize_mode_ui(mode_var.get(), width_label_edit, h_spin)
-        
-        mode_combo.bind("<<ComboboxSelected>>", update_edit_ui)
-        # 初始化界面（根据当前任务模式）
-        update_edit_ui()
-
-        # 第四行：裁剪
-        row4 = ttk.Frame(dlg)
-        row4.pack(fill=tk.X, pady=5, padx=10)
-        crop_enabled_var = tk.BooleanVar(value=task.get('crop_enabled', False))
-        ttk.Checkbutton(row4, text="启用裁剪", variable=crop_enabled_var).pack(side=tk.LEFT, padx=2)
-        ttk.Label(row4, text="x:").pack(side=tk.LEFT, padx=(5,0))
-        crop_x_var = tk.StringVar(value=task.get('crop_x', '0'))
-        ttk.Entry(row4, textvariable=crop_x_var, width=5).pack(side=tk.LEFT, padx=2)
-        ttk.Label(row4, text="y:").pack(side=tk.LEFT)
-        crop_y_var = tk.StringVar(value=task.get('crop_y', '0'))
-        ttk.Entry(row4, textvariable=crop_y_var, width=5).pack(side=tk.LEFT, padx=2)
-        ttk.Label(row4, text="w:").pack(side=tk.LEFT)
-        crop_w_var = tk.StringVar(value=task.get('crop_w', 'iw'))
-        ttk.Entry(row4, textvariable=crop_w_var, width=6).pack(side=tk.LEFT, padx=2)
-        ttk.Label(row4, text="h:").pack(side=tk.LEFT)
-        crop_h_var = tk.StringVar(value=task.get('crop_h', 'ih'))
-        ttk.Entry(row4, textvariable=crop_h_var, width=6).pack(side=tk.LEFT, padx=2)
-
-        # 第五行：输出名称模板 + 重名处理 + EXIF
-        row5 = ttk.Frame(dlg)
-        row5.pack(fill=tk.X, pady=5, padx=10)
-        ttk.Label(row5, text="输出名称模板:").pack(side=tk.LEFT, padx=5)
-        name_var = tk.StringVar(value=task['name_template'])
-        name_combo = ttk.Combobox(row5, textvariable=name_var,
-                                  values=["{Filename}", "{Folder name}{Filename}"],
-                                  state="readonly", width=20)
+        dlg.deiconify()
+        dlg.lift()
+        dlg.focus_force()
+    
+        main_frame = ttk.Frame(dlg)
+        main_frame.pack(fill=tk.BOTH, expand=True, padx=10, pady=10)
+    
+        # 左右分栏：左边参数，右边预览
+        left_panel = ttk.Frame(main_frame)
+        left_panel.pack(side=tk.LEFT, fill=tk.BOTH, expand=True, padx=(0,10))
+        right_panel = ttk.Frame(main_frame)
+        right_panel.pack(side=tk.RIGHT, fill=tk.BOTH, expand=True)
+    
+        # 编辑器（默认展开更多调整）
+        editor = TemplateEditor(left_panel, include_exif_date_delete=True, default_expanded=True)
+        editor.pack(fill=tk.BOTH, expand=True)
+        editor.set_settings(task)
+    
+        # 输出名称模板、重名处理（单独一行）
+        row = ttk.Frame(left_panel)
+        row.pack(fill=tk.X, pady=5)
+        ttk.Label(row, text="输出名称模板:").pack(side=tk.LEFT, padx=5)
+        name_var = tk.StringVar(value=task.get('name_template', '{Filename}'))
+        name_combo = ttk.Combobox(row, textvariable=name_var,
+                                  values=["{Filename}", "{Folder name}{Filename}", "{Original}/{Filename}", "{Folder name}_{Filename}", "{Original}/123/{Filename}"],
+                                  width=20)
         name_combo.pack(side=tk.LEFT, padx=5)
-        ttk.Label(row5, text="重名处理:").pack(side=tk.LEFT, padx=(10,2))
-        dup_var = tk.StringVar(value=task.get('duplicate_mode', self.duplicate_mode.get()))
-        dup_combo = ttk.Combobox(row5, textvariable=dup_var,
-                                 values=["覆盖", "自动重命名"], state="readonly", width=10)
-        dup_combo.pack(side=tk.LEFT, padx=2)
-        keep_exif_var = tk.BooleanVar(value=task.get('keep_exif', self.keep_exif_var.get()))
-        ttk.Checkbutton(row5, text="保留EXIF", variable=keep_exif_var).pack(side=tk.LEFT, padx=5)
-
-        btn_frame = ttk.Frame(dlg)
-        btn_frame.pack(pady=15)
-        def save():
-            task.update({
-                'format': fmt_var.get(),
-                'quality': qual_var.get(),
-                'rotation': rot_var.get(),
-                'h_flip': h_var.get(),
-                'v_flip': v_var.get(),
-                'resize_mode': mode_var.get(),
-                'resize_w': w_var.get(),
-                'resize_h': h_var2.get(),
-                'name_template': name_var.get(),
-                'crop_enabled': crop_enabled_var.get(),
-                'crop_x': crop_x_var.get(),
-                'crop_y': crop_y_var.get(),
-                'crop_w': crop_w_var.get(),
-                'crop_h': crop_h_var.get(),
-                'duplicate_mode': dup_var.get(),
-                'keep_exif': keep_exif_var.get()
-            })
+        ttk.Label(row, text="重名处理:").pack(side=tk.LEFT, padx=(10,5))
+        dup_var = tk.StringVar(value=task.get('duplicate_mode', '覆盖'))
+        dup_combo = ttk.Combobox(row, textvariable=dup_var,
+                                 values=["覆盖", "自动重命名", "询问", "跳过"], state="readonly", width=10)
+        dup_combo.pack(side=tk.LEFT, padx=5)
+    
+        # 右侧预览区域
+        preview_label = ttk.Label(right_panel, text="实时预览", anchor=tk.CENTER)
+        preview_label.pack(pady=5)
+        preview_canvas = tk.Canvas(right_panel, bg='gray', relief=tk.SUNKEN, width=300, height=300)
+        preview_canvas.pack(fill=tk.BOTH, expand=True, padx=5, pady=5)
+        preview_status = ttk.Label(right_panel, text="调整参数即刷新")
+        preview_status.pack(pady=5)
+    
+        # 防抖用的 after_id
+        after_id = [None]
+    
+        def update_preview():
+            # 获取当前编辑器的设置
+            settings = editor.get_settings()
+            settings['name_template'] = name_var.get()
+            settings['duplicate_mode'] = dup_var.get()
+            # 生成预览图片
+            def generate():
+                try:
+                    img = Image.open(task['path'])
+                    # 应用所有处理（顺序与转换一致）
+                    angle = int(settings['rotation'].rstrip('°'))
+                    if angle != 0:
+                        img = img.rotate(angle, expand=True, resample=Image.NEAREST)
+                    if settings['h_flip']:
+                        img = img.transpose(Image.FLIP_LEFT_RIGHT)
+                    if settings['v_flip']:
+                        img = img.transpose(Image.FLIP_TOP_BOTTOM)
+    
+                    if settings['resize_mode'] != "无调整":
+                        img = self.apply_resize(img, settings['resize_mode'], settings['resize_w'], settings['resize_h'], resample=Image.NEAREST)
+    
+                    if settings.get('crop_enabled', False):
+                        w_cur, h_cur = img.size
+                        x = self.eval_crop_expr(settings['crop_x'], w_cur, h_cur)
+                        y = self.eval_crop_expr(settings['crop_y'], w_cur, h_cur)
+                        w = self.eval_crop_expr(settings['crop_w'], w_cur, h_cur)
+                        h = self.eval_crop_expr(settings['crop_h'], w_cur, h_cur)
+                        x = max(0, min(x, w_cur-1))
+                        y = max(0, min(y, h_cur-1))
+                        w = min(w, w_cur - x)
+                        h = min(h, h_cur - y)
+                        if w > 0 and h > 0:
+                            img = img.crop((x, y, x+w, y+h))
+    
+                    if settings.get('brightness_enable', False) and settings.get('brightness_val', 0) != 0:
+                        enhancer = ImageEnhance.Brightness(img)
+                        factor = 1 + settings['brightness_val'] / 100.0
+                        img = enhancer.enhance(factor)
+    
+                    if settings.get('contrast_enable', False) and settings.get('contrast_val', 0) != 0:
+                        enhancer = ImageEnhance.Contrast(img)
+                        factor = 1 + settings['contrast_val'] / 100.0
+                        img = enhancer.enhance(factor)
+    
+                    if settings.get('saturation_enable', False) and settings.get('saturation_val', 0) != 0:
+                        enhancer = ImageEnhance.Color(img)
+                        factor = 1 + settings['saturation_val'] / 100.0
+                        img = enhancer.enhance(factor)
+    
+                    if settings.get('color_enable', False):
+                        r_factor = (settings.get('r_gain', 0) + 100) / 100.0
+                        g_factor = (settings.get('g_gain', 0) + 100) / 100.0
+                        b_factor = (settings.get('b_gain', 0) + 100) / 100.0
+                        if r_factor != 1 or g_factor != 1 or b_factor != 1:
+                            r, g, b = img.split()
+                            r = r.point(lambda i: i * r_factor)
+                            g = g.point(lambda i: i * g_factor)
+                            b = b.point(lambda i: i * b_factor)
+                            img = Image.merge('RGB', (r, g, b))
+    
+                    # 锐化
+                    if settings.get('sharpen_enable', False) and settings.get('sharpen_val', 0) != 0:
+                        enhancer = ImageEnhance.Sharpness(img)
+                        factor = 1 + settings['sharpen_val'] / 100.0
+                        img = enhancer.enhance(factor)
+    
+                    # 缩放预览到画布大小
+                    canvas_w = preview_canvas.winfo_width()
+                    canvas_h = preview_canvas.winfo_height()
+                    if canvas_w > 10 and canvas_h > 10:
+                        img.thumbnail((canvas_w, canvas_h), Image.NEAREST)
+                    else:
+                        img.thumbnail((400, 400), Image.NEAREST)
+                    photo = ImageTk.PhotoImage(img)
+                    preview_canvas.delete("all")
+                    preview_canvas.create_image(preview_canvas.winfo_width()//2, preview_canvas.winfo_height()//2,
+                                                image=photo, anchor=tk.CENTER)
+                    preview_canvas.image = photo
+                    preview_status.config(text=f"预览 | {img.size[0]}x{img.size[1]}")
+                except Exception as e:
+                    preview_status.config(text=f"预览失败: {str(e)}")
+                    preview_canvas.delete("all")
+                    preview_canvas.create_text(10, 10, anchor=tk.NW, text=f"错误: {e}", fill="red")
+    
+            # 防抖：延迟 150ms 执行
+            if after_id[0] is not None:
+                dlg.after_cancel(after_id[0])
+            after_id[0] = dlg.after(150, generate)
+    
+        # 绑定编辑器所有设置变化
+        editor.bind_preview_callback(lambda s: update_preview())
+        # 名称模板和重名处理变化也触发刷新
+        name_var.trace_add('write', lambda *a: update_preview())
+        dup_var.trace_add('write', lambda *a: update_preview())
+        # 初始生成一次预览
+        dlg.after(200, update_preview)
+    
+        # 保存按钮逻辑（不变，但需注意变量作用域）
+        def save_single():
+            new_settings = editor.get_settings()
+            new_settings['name_template'] = name_var.get()
+            new_settings['duplicate_mode'] = dup_var.get()
+            task.update(new_settings)
             new_display = self.get_task_display_text(task)
             self.task_listbox.delete(idx)
             self.task_listbox.insert(idx, new_display)
-            self.preview_image(task)
+            self._show_preview(task)
+            self.save_current_state_to_history()
             dlg.destroy()
-        ttk.Button(btn_frame, text="保存", command=save).pack(side=tk.LEFT, padx=10)
+    
+        def save_batch():
+            new_settings = editor.get_settings()
+            new_settings['name_template'] = name_var.get()
+            new_settings['duplicate_mode'] = dup_var.get()
+            for i in selected_indices:
+                t = self.tasks[i]
+                t.update(new_settings)
+                self.task_listbox.delete(i)
+                self.task_listbox.insert(i, self.get_task_display_text(t))
+            if selected_indices:
+                self._show_preview(self.tasks[selected_indices[0]])
+            self.save_current_state_to_history()
+            dlg.destroy()
+    
+        btn_frame = ttk.Frame(left_panel)
+        btn_frame.pack(pady=15)
+        is_multi = selected_indices is not None and len(selected_indices) > 1
+        if not is_multi:
+            ttk.Button(btn_frame, text="保存", command=save_single).pack(side=tk.LEFT, padx=10)
+        else:
+            ttk.Button(btn_frame, text="仅保存当前任务", command=save_single).pack(side=tk.LEFT, padx=5)
+            ttk.Button(btn_frame, text=f"应用到所有 {len(selected_indices)} 个任务", command=save_batch).pack(side=tk.LEFT, padx=5)
         ttk.Button(btn_frame, text="取消", command=dlg.destroy).pack(side=tk.LEFT, padx=10)
 
-    # ========== 任务管理 ==========
+    # ---------- 任务管理 ----------
     def remove_selected(self):
         if self.converting:
             messagebox.showwarning("警告", "转换进行中，无法删除任务")
@@ -874,7 +1661,6 @@ class ImageConverter(TkinterDnD.Tk):
         for i in reversed(self.task_listbox.curselection()):
             del self.tasks[i]
             self.task_listbox.delete(i)
-        self.preview_canvas.delete("all")
         self.save_current_state_to_history()
 
     def clear_tasks(self):
@@ -883,12 +1669,11 @@ class ImageConverter(TkinterDnD.Tk):
             return
         self.tasks.clear()
         self.task_listbox.delete(0, tk.END)
-        self.preview_canvas.delete("all")
         self.progress_var.set(0)
         self.progress_label.config(text="就绪")
         self.save_current_state_to_history()
 
-    # ========== 预设功能 ==========
+    # ---------- 预设功能 ----------
     def load_presets_list(self):
         names = list(self.presets.keys())
         self.preset_combo['values'] = names
@@ -904,33 +1689,23 @@ class ImageConverter(TkinterDnD.Tk):
         if self.converting:
             messagebox.showwarning("警告", "转换进行中，无法保存预设")
             return
-        name = simpledialog.askstring("保存预设", "请输入预设名称:", parent=self)
+        current_name = self.preset_combo.get()
+        if current_name:
+            name = simpledialog.askstring("保存预设", "请输入预设名称:", parent=self, initialvalue=current_name)
+        else:
+            name = simpledialog.askstring("保存预设", "请输入预设名称:", parent=self)
         if not name:
             return
         if name in self.presets:
             if not messagebox.askyesno("确认覆盖", f"预设 '{name}' 已存在，是否覆盖？"):
                 return
-        preset_data = {
-            'output_dir': self.output_dir.get(),
-            'format': self.format_var.get(),
-            'quality': self.quality_var.get(),
-            'rotation': self.rotation_var.get(),
-            'h_flip': self.h_flip_var.get(),
-            'v_flip': self.v_flip_var.get(),
-            'resize_mode': self.resize_mode_var.get(),
-            'resize_w': self.resize_width_var.get(),
-            'resize_h': self.resize_height_var.get(),
-            'name_template': self.name_template_var.get(),
-            'crop_enabled': self.crop_enabled_var.get(),
-            'crop_x': self.crop_x_var.get(),
-            'crop_y': self.crop_y_var.get(),
-            'crop_w': self.crop_w_var.get(),
-            'crop_h': self.crop_h_var.get(),
-            'keep_exif': self.keep_exif_var.get()
-        }
-        self.presets[name] = preset_data
+        settings = self.template_editor.get_settings()
+        settings['output_dir'] = self.output_dir.get()
+        settings['name_template'] = self.name_template_var.get()
+        settings['duplicate_mode'] = self.duplicate_mode_var.get()
+        self.presets[name] = settings
         self.save_settings_and_presets()
-        self.preset_combo['values'] = list(self.presets.keys())
+        self.load_presets_list()
         self.preset_combo.set(name)
         messagebox.showinfo("成功", f"预设 '{name}' 已保存")
 
@@ -946,26 +1721,37 @@ class ImageConverter(TkinterDnD.Tk):
             messagebox.showerror("错误", f"预设 '{name}' 不存在")
             return
         p = self.presets[name]
-        self.output_dir.set(p.get('output_dir', os.getcwd()))
-        self.format_var.set(p.get('format', 'JPEG'))
-        self.quality_var.set(p.get('quality', 85))
-        self.rotation_var.set(p.get('rotation', '0°'))
-        self.h_flip_var.set(p.get('h_flip', False))
-        self.v_flip_var.set(p.get('v_flip', False))
-        self.resize_mode_var.set(p.get('resize_mode', '无调整'))
-        self.resize_width_var.set(p.get('resize_w', 800))
-        self.resize_height_var.set(p.get('resize_h', 600))
-        self.name_template_var.set(p.get('name_template', '{Filename}'))
-        self.crop_enabled_var.set(p.get('crop_enabled', False))
-        self.crop_x_var.set(p.get('crop_x', '0'))
-        self.crop_y_var.set(p.get('crop_y', '0'))
-        self.crop_w_var.set(p.get('crop_w', 'iw'))
-        self.crop_h_var.set(p.get('crop_h', 'ih'))
-        self.keep_exif_var.set(p.get('keep_exif', False))
-        self.update_template_preview()
+        if 'output_dir' in p:
+            self.output_dir.set(os.path.normpath(p['output_dir']))
+        self.template_editor.set_settings(p)
+        if 'name_template' in p:
+            self.name_template_var.set(p['name_template'])
+        if 'duplicate_mode' in p:
+            self.duplicate_mode_var.set(p['duplicate_mode'])
         messagebox.showinfo("成功", f"预设 '{name}' 已加载")
 
-    # ========== 多线程转换 ==========
+    def delete_preset(self):
+        if self.converting:
+            messagebox.showwarning("警告", "转换进行中，无法删除预设")
+            return
+        name = self.preset_combo.get()
+        if not name:
+            messagebox.showwarning("警告", "请先选择一个预设")
+            return
+        if name not in self.presets:
+            messagebox.showerror("错误", f"预设 '{name}' 不存在")
+            return
+        if messagebox.askyesno("确认删除", f"确定要删除预设 '{name}' 吗？"):
+            del self.presets[name]
+            self.save_settings_and_presets()
+            self.load_presets_list()
+            if self.presets:
+                self.preset_combo.set(list(self.presets.keys())[0])
+            else:
+                self.preset_combo.set('')
+            messagebox.showinfo("成功", f"预设 '{name}' 已删除")
+
+    # ---------- 多线程转换 ----------
     def start_convert(self):
         if self.converting:
             messagebox.showwarning("警告", "转换正在进行中，请稍后")
@@ -977,32 +1763,68 @@ class ImageConverter(TkinterDnD.Tk):
             if not messagebox.askyesno("确认", f"共有 {len(self.tasks)} 个任务，是否继续？"):
                 return
 
-        out_dir = self.output_dir.get()
-        os.makedirs(out_dir, exist_ok=True)
+        # 检查是否有任务开启了删除原文件
+        has_delete = any(task.get('delete_original', False) for task in self.tasks)
+        if has_delete:
+            delete_count = sum(1 for task in self.tasks if task.get('delete_original', False))
+            msg = f"检测到 {delete_count} 个任务开启了“删除原文件”选项。\n\n删除操作会将原文件移至回收站/废纸篓，不可恢复！\n\n是否继续转换？"
+            if not messagebox.askyesno("确认删除", msg, icon='warning'):
+                return
 
+    
+        # 处理输出目录：为空则设为 None（表示使用原目录）
+        out_dir_input = self.output_dir.get().strip()
+        if out_dir_input == "":
+            out_dir = None
+        else:
+            out_dir = os.path.normpath(out_dir_input)
+            os.makedirs(out_dir, exist_ok=True)
+    
+        dangerous_fixed = False
+        for idx, task in enumerate(self.tasks):
+            src_dir = os.path.dirname(os.path.normpath(task['path']))
+            dup_mode = task.get('duplicate_mode', self.duplicate_mode_var.get())
+            # 只有当输出目录非空且等于源目录时才警告
+            if out_dir is not None and src_dir == out_dir and dup_mode == "覆盖":
+                task['duplicate_mode'] = "自动重命名"
+                self.task_listbox.delete(idx)
+                self.task_listbox.insert(idx, self.get_task_display_text(task))
+                dangerous_fixed = True
+    
+        if dangerous_fixed:
+            messagebox.showwarning("安全提示",
+                "检测到有任务的输出目录与源文件目录相同，且原重名处理为“覆盖”。\n"
+                "为避免源文件损坏，已自动将这些任务的“重名处理”改为“自动重命名”。\n"
+                "请确认任务列表中的变更。")
+    
+        # 获取 resolved_items: 列表元素为 (task, original_index)
+        resolved_items = self.resolve_duplicate_paths(self.tasks, out_dir)
+        if not resolved_items:
+            messagebox.showinfo("提示", "所有任务均被跳过，没有需要转换的任务")
+            return
+    
         self.start_btn.config(state=tk.DISABLED)
         self.converting = True
         self.enable_task_edit_buttons(False)
-
-        self.total_tasks = len(self.tasks)
+    
+        self.total_tasks = len(resolved_items)
         self.progress_bar['maximum'] = self.total_tasks
         self.progress_var.set(0)
         self.progress_label.config(text=f"0 / {self.total_tasks}")
-
-        tasks_list = self.tasks.copy()
+    
         max_workers = self.thread_count_var.get()
         if max_workers < 1:
             max_workers = 1
-
+    
         if self.executor:
             self.executor.shutdown(wait=False)
         self.executor = ThreadPoolExecutor(max_workers=max_workers)
-
+    
         self.futures = []
-        for idx, task in enumerate(tasks_list):
-            future = self.executor.submit(self._convert_single, task, out_dir, idx)
-            self.futures.append((future, idx))
-
+        for task, original_idx in resolved_items:
+            future = self.executor.submit(self._convert_single, task, out_dir, original_idx)
+            self.futures.append((future, original_idx))
+    
         self.processed_indices.clear()
         self.after(100, self._poll_futures)
 
@@ -1010,19 +1832,18 @@ class ImageConverter(TkinterDnD.Tk):
         if not self.futures:
             self._on_convert_finished()
             return
-
         remaining = []
-        for future, idx in self.futures:
+        for future, original_idx in self.futures:
             if future.done():
                 try:
-                    idx, success, error = future.result()
+                    idx, success, error = future.result()   # idx 就是 original_idx
                     self._update_task_item(idx, success, error)
                     self.progress_var.set(self.progress_var.get() + 1)
                     self.progress_label.config(text=f"{self.progress_var.get()} / {self.total_tasks}")
                 except Exception as e:
-                    self._update_task_item(idx, False, str(e))
+                    self._update_task_item(original_idx, False, str(e))
             else:
-                remaining.append((future, idx))
+                remaining.append((future, original_idx))
         self.futures = remaining
         self.after(100, self._poll_futures)
 
@@ -1054,8 +1875,8 @@ class ImageConverter(TkinterDnD.Tk):
         messagebox.showinfo("完成", f"转换完成\n成功: {success_count}\n失败: {len(self.tasks)-success_count}\n输出目录: {self.output_dir.get()}")
         self.progress_label.config(text="完成")
 
-    # ========== 转换单张图片（线程安全保存） ==========
-    def _convert_single(self, task, out_dir, idx):
+    # ---------- 转换单张图片 ----------
+    def _convert_single(self, task, out_dir, original_idx):
         src = task['path']
         fmt = task['format']
         qual = task['quality']
@@ -1071,82 +1892,171 @@ class ImageConverter(TkinterDnD.Tk):
         crop_y = task.get('crop_y', '0')
         crop_w = task.get('crop_w', 'iw')
         crop_h = task.get('crop_h', 'ih')
-        dup_mode = task.get('duplicate_mode', self.duplicate_mode.get())
         keep_exif = task.get('keep_exif', self.keep_exif_var.get())
-
-        out_name = self.build_output_name(name_tmpl, src)
-        ext_map = {'JPEG':'.jpg', 'PNG':'.png', 'WEBP':'.webp'}
-        base_out = os.path.join(out_dir, out_name + ext_map[fmt])
-
-        out_path = self._get_unique_filename(base_out, dup_mode)
-
+        preserve_date = task.get('preserve_original_date', self.preserve_date_var.get())
+        delete_original = task.get('delete_original', self.delete_original_var.get())
+        brightness_enable = task.get('brightness_enable', False)
+        brightness_val = task.get('brightness_val', 0)
+        contrast_enable = task.get('contrast_enable', False)
+        contrast_val = task.get('contrast_val', 0)
+        color_enable = task.get('color_enable', False)
+        r_gain = task.get('r_gain', 0)
+        g_gain = task.get('g_gain', 0)
+        b_gain = task.get('b_gain', 0)
+        saturation_enable = task.get('saturation_enable', False)
+        saturation_val = task.get('saturation_val', 0)
+        sharpen_enable = task.get('sharpen_enable', False)
+        sharpen_val = task.get('sharpen_val', 0)
+    
+        # 获取输出路径（可能在 resolve 阶段已设置）
+        out_path = task.get('out_path')
+        if out_path is None:
+            # 未预先设置，则动态生成（兼容旧逻辑）
+            name_or_path = self.build_output_name(name_tmpl, src)
+            ext_map = {'JPEG':'.jpg', 'PNG':'.png', 'WEBP':'.webp'}
+            ext = ext_map[fmt]
+            if "{Original}" in name_tmpl:
+                out_path = name_or_path + ext
+            else:
+                if out_dir is None:
+                    out_dir = os.path.dirname(src)
+                out_path = os.path.join(out_dir, name_or_path + ext)
+            
+            dup_mode = task.get('duplicate_mode', self.duplicate_mode_var.get())
+            out_path = self._get_unique_filename(out_path, dup_mode)
+    
+        # 确保输出目录存在
+        out_dir_path = os.path.dirname(out_path)
+        if out_dir_path:
+            os.makedirs(out_dir_path, exist_ok=True)
+    
+        src_stat = None
+        if preserve_date and os.path.exists(src):
+            src_stat = os.stat(src)
+    
         try:
-            img = Image.open(src)
-            if angle != 0:
-                img = img.rotate(angle, expand=True, resample=Image.BICUBIC)
-            if h_flip:
-                img = img.transpose(Image.FLIP_LEFT_RIGHT)
-            if v_flip:
-                img = img.transpose(Image.FLIP_TOP_BOTTOM)
-            if mode != "无调整":
-                img = self.apply_resize(img, mode, w, h)
-            if crop_enabled:
-                w_cur, h_cur = img.size
-                x = self.eval_crop_expr(crop_x, w_cur, h_cur)
-                y = self.eval_crop_expr(crop_y, w_cur, h_cur)
-                w_crop = self.eval_crop_expr(crop_w, w_cur, h_cur)
-                h_crop = self.eval_crop_expr(crop_h, w_cur, h_cur)
-                x = max(0, min(x, w_cur-1))
-                y = max(0, min(y, h_cur-1))
-                w_crop = min(w_crop, w_cur - x)
-                h_crop = min(h_crop, h_cur - y)
-                if w_crop > 0 and h_crop > 0:
-                    img = img.crop((x, y, x+w_crop, y+h_crop))
-
-            exif = None
-            if keep_exif and hasattr(img, 'info') and 'exif' in img.info:
-                exif = img.info['exif']
-
-            save_kwargs = {}
-            if fmt == 'JPEG':
-                if img.mode in ('RGBA','LA','P'):
-                    img = img.convert('RGB')
-                save_kwargs = {'quality': qual, 'optimize': True}
-                if exif:
-                    save_kwargs['exif'] = exif
-                img.save(out_path, 'JPEG', **save_kwargs)
-            elif fmt == 'PNG':
-                comp = max(0, min(9, int((100 - qual) / 11.1)))
-                save_kwargs = {'compress_level': comp}
-                img.save(out_path, 'PNG', **save_kwargs)
-            elif fmt == 'WEBP':
-                save_kwargs = {'quality': qual, 'lossless': False}
-                if exif:
-                    save_kwargs['exif'] = exif
-                img.save(out_path, 'WEBP', **save_kwargs)
-            return (idx, True, None)
+            with Image.open(src) as img:
+                # 以下转换代码保持不变（旋转、翻转、缩放、裁剪等）
+                if angle != 0:
+                    img = img.rotate(angle, expand=True, resample=Image.LANCZOS)
+                if h_flip:
+                    img = img.transpose(Image.FLIP_LEFT_RIGHT)
+                if v_flip:
+                    img = img.transpose(Image.FLIP_TOP_BOTTOM)
+                if mode != "无调整":
+                    img = self.apply_resize(img, mode, w, h)
+                if crop_enabled:
+                    w_cur, h_cur = img.size
+                    x = self.eval_crop_expr(crop_x, w_cur, h_cur)
+                    y = self.eval_crop_expr(crop_y, w_cur, h_cur)
+                    w_crop = self.eval_crop_expr(crop_w, w_cur, h_cur)
+                    h_crop = self.eval_crop_expr(crop_h, w_cur, h_cur)
+                    x = max(0, min(x, w_cur-1))
+                    y = max(0, min(y, h_cur-1))
+                    w_crop = min(w_crop, w_cur - x)
+                    h_crop = min(h_crop, h_cur - y)
+                    if w_crop > 0 and h_crop > 0:
+                        img = img.crop((x, y, x+w_crop, y+h_crop))
+                if brightness_enable and brightness_val != 0:
+                    enhancer = ImageEnhance.Brightness(img)
+                    factor = 1 + brightness_val / 100.0
+                    img = enhancer.enhance(factor)
+                if contrast_enable and contrast_val != 0:
+                    enhancer = ImageEnhance.Contrast(img)
+                    factor = 1 + contrast_val / 100.0
+                    img = enhancer.enhance(factor)
+                if saturation_enable and saturation_val != 0:
+                    enhancer = ImageEnhance.Color(img)
+                    factor = 1 + saturation_val / 100.0
+                    img = enhancer.enhance(factor)
+                if color_enable:
+                    r_factor = (r_gain + 100) / 100.0
+                    g_factor = (g_gain + 100) / 100.0
+                    b_factor = (b_gain + 100) / 100.0
+                    if r_factor != 1 or g_factor != 1 or b_factor != 1:
+                        # 检查是否有透明通道
+                        has_alpha = img.mode in ('RGBA', 'LA') or (img.mode == 'P' and 'transparency' in img.info)
+                        if has_alpha and img.mode != 'RGBA':
+                            img = img.convert('RGBA')
+                        if has_alpha:
+                            r, g, b, a = img.split()
+                            r = r.point(lambda i: i * r_factor)
+                            g = g.point(lambda i: i * g_factor)
+                            b = b.point(lambda i: i * b_factor)
+                            img = Image.merge('RGBA', (r, g, b, a))
+                        else:
+                            r, g, b = img.split()
+                            r = r.point(lambda i: i * r_factor)
+                            g = g.point(lambda i: i * g_factor)
+                            b = b.point(lambda i: i * b_factor)
+                            img = Image.merge('RGB', (r, g, b))
+                if sharpen_enable and sharpen_val != 0:
+                    enhancer = ImageEnhance.Sharpness(img)
+                    factor = 1 + sharpen_val / 100.0
+                    img = enhancer.enhance(factor)
+    
+                exif = None
+                if keep_exif and hasattr(img, 'info') and 'exif' in img.info:
+                    exif = img.info['exif']
+    
+                save_kwargs = {}
+                if fmt == 'JPEG':
+                    if img.mode in ('RGBA','LA','P'):
+                        img = img.convert('RGB')
+                    save_kwargs = {'quality': qual, 'optimize': True}
+                    if exif:
+                        save_kwargs['exif'] = exif
+                    img.save(out_path, 'JPEG', **save_kwargs)
+                elif fmt == 'PNG':
+                    comp = int((100 - qual) * 9 / 99)
+                    save_kwargs = {'compress_level': comp}
+                    img.save(out_path, 'PNG', **save_kwargs)
+                elif fmt == 'WEBP':
+                    # 检测是否需要保留透明度
+                    has_alpha = img.mode in ('RGBA', 'LA') or (img.mode == 'P' and 'transparency' in img.info)
+                    save_kwargs = {'quality': qual, 'lossless': False}
+                    if exif:
+                        save_kwargs['exif'] = exif
+                    # 如果图像有透明通道，确保模式为 RGBA（Pillow 会自动处理，但显式转换更安全）
+                    if has_alpha and img.mode != 'RGBA':
+                        img = img.convert('RGBA')
+                    img.save(out_path, 'WEBP', **save_kwargs)
+    
+            if preserve_date and src_stat is not None:
+                if platform.system() == 'Windows':
+                    ctime = os.path.getctime(src)
+                    try:
+                        self.set_file_times(out_path, ctime, src_stat.st_atime, src_stat.st_mtime)
+                    except Exception as e:
+                        print(f"设置文件时间戳失败: {e}")
+                else:
+                    os.utime(out_path, (src_stat.st_atime, src_stat.st_mtime))
+    
+            if delete_original and os.path.exists(src):
+                try:
+                    send_to_trash(src)
+                except Exception as e:
+                    raise Exception(f"删除原文件失败: {e}")
+    
+            return (original_idx, True, None)
         except Exception as e:
-            return (idx, False, str(e))
+            return (original_idx, False, str(e))
+
+
 
     def _get_unique_filename(self, base_path, dup_mode):
         if dup_mode == "覆盖":
             return base_path
-        dir_name = os.path.dirname(base_path)
-        base_name = os.path.basename(base_path)
-        name, ext = os.path.splitext(base_name)
-        counter = 1
-        candidate = base_path
-        while True:
-            try:
-                fd = os.open(candidate, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
-                os.close(fd)
-                return candidate
-            except FileExistsError:
+        with self.rename_lock:
+            dir_name = os.path.dirname(base_path)
+            base_name = os.path.basename(base_path)
+            name, ext = os.path.splitext(base_name)
+            candidate = base_path
+            counter = 1
+            while os.path.exists(candidate):
                 candidate = os.path.join(dir_name, f"{name}_{counter}{ext}")
                 counter += 1
-            except OSError:
-                candidate = os.path.join(dir_name, f"{name}_{counter}{ext}")
-                counter += 1
+            return candidate
 
 if __name__ == "__main__":
     app = ImageConverter()
