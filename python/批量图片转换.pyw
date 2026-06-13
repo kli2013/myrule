@@ -651,6 +651,7 @@ class ImageConverter(TkinterDnD.Tk):
         self.history_index = -1
         self.output_dir = tk.StringVar(value=self.default_output_dir)
         self.converting = False
+        self.cancel_convert = False   # 取消转换标志
         self.executor = None
         self.futures = []
         self.total_tasks = 0
@@ -1519,6 +1520,8 @@ class ImageConverter(TkinterDnD.Tk):
         btn_frame.pack(fill=tk.X, pady=5)
         self.start_btn = ttk.Button(btn_frame, text="开始转换", command=self.start_convert)
         self.start_btn.pack(side=tk.LEFT, padx=5)
+        self.cancel_btn = ttk.Button(btn_frame, text="取消转换", command=self.cancel_convert_func, state=tk.DISABLED)
+        self.cancel_btn.pack(side=tk.LEFT, padx=5)
         self.undo_btn = ttk.Button(btn_frame, text="撤销", command=self.undo)
         self.undo_btn.pack(side=tk.LEFT, padx=5)
         self.edit_btn = ttk.Button(btn_frame, text="编辑任务", command=self.edit_selected_task)
@@ -2014,6 +2017,13 @@ class ImageConverter(TkinterDnD.Tk):
         self.progress_label.config(text="就绪")
         self.save_current_state_to_history()
 
+    def cancel_convert_func(self):
+        """用户点击取消按钮时调用"""
+        if self.converting:
+            self.cancel_convert = True
+            self.progress_label.config(text="正在取消...")
+            self.cancel_btn.config(state=tk.DISABLED)  # 防止重复点击
+
     # ---------- 预设功能 ----------
     def load_presets_list(self):
         names = list(self.presets.keys())
@@ -2152,6 +2162,12 @@ class ImageConverter(TkinterDnD.Tk):
             return
     
         self.start_btn.config(state=tk.DISABLED)
+
+        self.converting = True
+        self.cancel_convert = False          # 重置取消标志
+        self.cancel_btn.config(state=tk.NORMAL)  # 启用取消按钮
+        self.enable_task_edit_buttons(False)
+
         self.converting = True
         self.enable_task_edit_buttons(False)
     
@@ -2177,9 +2193,19 @@ class ImageConverter(TkinterDnD.Tk):
         self.after(100, self._poll_futures)
 
     def _poll_futures(self):
+        # 检查是否取消转换
+        if self.cancel_convert:
+            # 取消所有未开始的任务
+            for future, idx in self.futures:
+                future.cancel()
+            self.futures.clear()
+            self._on_convert_finished()
+            return
+    
         if not self.futures:
             self._on_convert_finished()
             return
+
         remaining = []
         for future, original_idx in self.futures:
             if future.done():
@@ -2220,6 +2246,8 @@ class ImageConverter(TkinterDnD.Tk):
         self.converting = False
         self.start_btn.config(state=tk.NORMAL)
         self.enable_task_edit_buttons(True)
+        self.cancel_btn.config(state=tk.DISABLED)   # 禁用取消按钮
+        self.cancel_convert = False                 # 重置标志
         if self.executor:
             self.executor.shutdown(wait=False)
         success_count = sum(1 for i in range(len(self.tasks)) if " ✓" in self.task_listbox.get(i))
@@ -2312,6 +2340,9 @@ class ImageConverter(TkinterDnD.Tk):
 
     # ---------- 转换单张图片 ----------
     def _convert_single(self, task, out_dir, original_idx):
+        # 检查取消标志（如果用户已经取消，直接返回失败）
+        if self.cancel_convert:
+            return (original_idx, False, "用户取消", 0)
         src = task['path']
         fmt = task['format']
         qual = task['quality']
