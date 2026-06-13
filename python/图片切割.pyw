@@ -13,6 +13,13 @@ try:
 except ImportError:
     HAS_DND = False
 
+
+# ---------- 自定义异常 ----------
+class StopCutting(Exception):
+    """用户取消切割时抛出的异常"""
+    pass
+
+
 # ---------- 获取所有PIL支持的图片格式 ----------
 def get_supported_extensions():
     try:
@@ -21,12 +28,15 @@ def get_supported_extensions():
     except Exception:
         return ('.png', '.jpg', '.jpeg', '.bmp', '.tiff', '.webp', '.gif')
 
+
 SUPPORTED_IMG_EXT = get_supported_extensions()
 SUPPORTED_IMG_FILTER = " ".join(f"*{ext}" for ext in SUPPORTED_IMG_EXT)
+
 
 def is_image_file(filepath):
     ext = os.path.splitext(filepath)[1].lower()
     return ext in SUPPORTED_IMG_EXT
+
 
 # ---------- 提示类 ----------
 class ToolTip:
@@ -73,6 +83,7 @@ class ToolTip:
             self.tip_window.destroy()
             self.tip_window = None
 
+
 # ---------- 批量任务项 ----------
 class BatchItem:
     def __init__(self, filepath, template):
@@ -86,8 +97,9 @@ class BatchItem:
     def from_dict(cls, data):
         return cls(data["filepath"], data["template"])
 
-# ---------- 公用切割函数 ----------
-def cut_grid(img, rows, cols, out_dir, ext, save_params, progress_callback=None, file_prefix=""):
+
+# ---------- 公用切割函数（已添加 stop_check 支持取消） ----------
+def cut_grid(img, rows, cols, out_dir, ext, save_params, progress_callback=None, file_prefix="", stop_check=None):
     w, h = img.size
     if rows > h or cols > w:
         raise ValueError("网格超出图片边界")
@@ -96,10 +108,12 @@ def cut_grid(img, rows, cols, out_dir, ext, save_params, progress_callback=None,
     count = 0
     for i in range(rows):
         top = i * cell_h
-        bottom = top + cell_h if i < rows-1 else h
+        bottom = top + cell_h if i < rows - 1 else h
         for j in range(cols):
+            if stop_check and stop_check():
+                raise StopCutting()
             left = j * cell_w
-            right = left + cell_w if j < cols-1 else w
+            right = left + cell_w if j < cols - 1 else w
             cropped = img.crop((left, top, right, bottom))
             name = f"{i}_{j}"
             if file_prefix:
@@ -110,7 +124,8 @@ def cut_grid(img, rows, cols, out_dir, ext, save_params, progress_callback=None,
                 progress_callback(count)
     return count
 
-def cut_smart(img, blocks, ratios, direction, out_dir, ext, save_params, progress_callback=None, file_prefix=""):
+
+def cut_smart(img, blocks, ratios, direction, out_dir, ext, save_params, progress_callback=None, file_prefix="", stop_check=None):
     w, h = img.size
     if direction == "horizontal":
         for blk in blocks:
@@ -134,6 +149,8 @@ def cut_smart(img, blocks, ratios, direction, out_dir, ext, save_params, progres
             col_widths[-1] += diff
         left = 0
         for col_idx, blk in enumerate(blocks):
+            if stop_check and stop_check():
+                raise StopCutting()
             col_w = col_widths[col_idx]
             right = left + col_w
             block_h = h // blk
@@ -148,9 +165,11 @@ def cut_smart(img, blocks, ratios, direction, out_dir, ext, save_params, progres
                 heights.append(seg_h)
             top = 0
             for blk_idx, seg_h in enumerate(heights):
+                if stop_check and stop_check():
+                    raise StopCutting()
                 bottom = top + seg_h
                 cropped = img.crop((left, top, right, bottom))
-                name = f"S_c{col_idx+1}_r{blk_idx+1}"
+                name = f"S_c{col_idx + 1}_r{blk_idx + 1}"
                 if file_prefix:
                     name = f"{file_prefix}_{name}"
                 cropped.save(os.path.join(out_dir, f"{name}.{ext}"), **save_params)
@@ -172,6 +191,8 @@ def cut_smart(img, blocks, ratios, direction, out_dir, ext, save_params, progres
             row_heights[-1] += diff
         top = 0
         for row_idx, blk in enumerate(blocks):
+            if stop_check and stop_check():
+                raise StopCutting()
             row_h = row_heights[row_idx]
             bottom = top + row_h
             block_w = w // blk
@@ -186,9 +207,11 @@ def cut_smart(img, blocks, ratios, direction, out_dir, ext, save_params, progres
                 widths.append(seg_w)
             left = 0
             for blk_idx, seg_w in enumerate(widths):
+                if stop_check and stop_check():
+                    raise StopCutting()
                 right = left + seg_w
                 cropped = img.crop((left, top, right, bottom))
-                name = f"S_r{row_idx+1}_c{blk_idx+1}"
+                name = f"S_r{row_idx + 1}_c{blk_idx + 1}"
                 if file_prefix:
                     name = f"{file_prefix}_{name}"
                 cropped.save(os.path.join(out_dir, f"{name}.{ext}"), **save_params)
@@ -199,7 +222,8 @@ def cut_smart(img, blocks, ratios, direction, out_dir, ext, save_params, progres
             top = bottom
     return count
 
-def cut_advanced(img, pattern, group_ratios, direction, out_dir, ext, save_params, progress_callback=None, file_prefix=""):
+
+def cut_advanced(img, pattern, group_ratios, direction, out_dir, ext, save_params, progress_callback=None, file_prefix="", stop_check=None):
     w, h = img.size
     if direction == "horizontal":
         for (blk, _) in pattern:
@@ -223,6 +247,8 @@ def cut_advanced(img, pattern, group_ratios, direction, out_dir, ext, save_param
             col_widths[-1] += diff
         left = 0
         for col_idx, (blk, ratios) in enumerate(pattern):
+            if stop_check and stop_check():
+                raise StopCutting()
             col_w = col_widths[col_idx]
             right = left + col_w
             if ratios is None:
@@ -238,9 +264,11 @@ def cut_advanced(img, pattern, group_ratios, direction, out_dir, ext, save_param
                     heights.append(seg_h)
                 top = 0
                 for blk_idx, seg_h in enumerate(heights):
+                    if stop_check and stop_check():
+                        raise StopCutting()
                     bottom = top + seg_h
                     cropped = img.crop((left, top, right, bottom))
-                    name = f"A_c{col_idx+1}_r{blk_idx+1}"
+                    name = f"A_c{col_idx + 1}_r{blk_idx + 1}"
                     if file_prefix:
                         name = f"{file_prefix}_{name}"
                     cropped.save(os.path.join(out_dir, f"{name}.{ext}"), **save_params)
@@ -260,10 +288,12 @@ def cut_advanced(img, pattern, group_ratios, direction, out_dir, ext, save_param
                     heights.append(seg_h)
                 top = 0
                 for blk_idx, seg_h in enumerate(heights):
+                    if stop_check and stop_check():
+                        raise StopCutting()
                     bottom = top + seg_h
                     if ratios[blk_idx][1]:
                         cropped = img.crop((left, top, right, bottom))
-                        name = f"A_c{col_idx+1}_r{blk_idx+1}"
+                        name = f"A_c{col_idx + 1}_r{blk_idx + 1}"
                         if file_prefix:
                             name = f"{file_prefix}_{name}"
                         cropped.save(os.path.join(out_dir, f"{name}.{ext}"), **save_params)
@@ -285,6 +315,8 @@ def cut_advanced(img, pattern, group_ratios, direction, out_dir, ext, save_param
             row_heights[-1] += diff
         top = 0
         for row_idx, (blk, ratios) in enumerate(pattern):
+            if stop_check and stop_check():
+                raise StopCutting()
             row_h = row_heights[row_idx]
             bottom = top + row_h
             if ratios is None:
@@ -300,9 +332,11 @@ def cut_advanced(img, pattern, group_ratios, direction, out_dir, ext, save_param
                     widths.append(seg_w)
                 left = 0
                 for blk_idx, seg_w in enumerate(widths):
+                    if stop_check and stop_check():
+                        raise StopCutting()
                     right = left + seg_w
                     cropped = img.crop((left, top, right, bottom))
-                    name = f"A_r{row_idx+1}_c{blk_idx+1}"
+                    name = f"A_r{row_idx + 1}_c{blk_idx + 1}"
                     if file_prefix:
                         name = f"{file_prefix}_{name}"
                     cropped.save(os.path.join(out_dir, f"{name}.{ext}"), **save_params)
@@ -322,10 +356,12 @@ def cut_advanced(img, pattern, group_ratios, direction, out_dir, ext, save_param
                     widths.append(seg_w)
                 left = 0
                 for blk_idx, seg_w in enumerate(widths):
+                    if stop_check and stop_check():
+                        raise StopCutting()
                     right = left + seg_w
                     if ratios[blk_idx][1]:
                         cropped = img.crop((left, top, right, bottom))
-                        name = f"A_r{row_idx+1}_c{blk_idx+1}"
+                        name = f"A_r{row_idx + 1}_c{blk_idx + 1}"
                         if file_prefix:
                             name = f"{file_prefix}_{name}"
                         cropped.save(os.path.join(out_dir, f"{name}.{ext}"), **save_params)
@@ -336,16 +372,19 @@ def cut_advanced(img, pattern, group_ratios, direction, out_dir, ext, save_param
             top = bottom
     return count
 
-def cut_free(img, rects, out_dir, ext, save_params, progress_callback=None, file_prefix=""):
+
+def cut_free(img, rects, out_dir, ext, save_params, progress_callback=None, file_prefix="", stop_check=None):
     img_w, img_h = img.size
     count = 0
     for idx, (x, y, w, h) in enumerate(rects):
+        if stop_check and stop_check():
+            raise StopCutting()
         if x < 0 or y < 0 or x + w > img_w or y + h > img_h:
-            raise ValueError(f"矩形 {idx+1} 超出图片边界")
+            raise ValueError(f"矩形 {idx + 1} 超出图片边界")
         if w <= 0 or h <= 0:
-            raise ValueError(f"矩形 {idx+1} 尺寸无效")
+            raise ValueError(f"矩形 {idx + 1} 尺寸无效")
         cropped = img.crop((x, y, x + w, y + h))
-        name = f"free_{idx+1}"
+        name = f"free_{idx + 1}"
         if file_prefix:
             name = f"{file_prefix}_{name}"
         cropped.save(os.path.join(out_dir, f"{name}.{ext}"), **save_params)
@@ -353,6 +392,7 @@ def cut_free(img, rects, out_dir, ext, save_params, progress_callback=None, file
         if progress_callback:
             progress_callback(count)
     return count
+
 
 # ---------- 公用解析函数 ----------
 def parse_smart_pattern(text):
@@ -410,6 +450,7 @@ def parse_smart_pattern(text):
         else:
             ratios = None
     return blocks, ratios
+
 
 def parse_advanced_pattern(text):
     if not text:
@@ -478,6 +519,7 @@ def parse_advanced_pattern(text):
         return None, None
     return group_ratios, result
 
+
 def parse_free_pattern(text):
     if not text:
         return []
@@ -505,9 +547,9 @@ def parse_free_pattern(text):
                 for i in range(0, len(parts), 4):
                     try:
                         x = int(parts[i])
-                        y = int(parts[i+1])
-                        w = int(parts[i+2])
-                        h = int(parts[i+3])
+                        y = int(parts[i + 1])
+                        w = int(parts[i + 2])
+                        h = int(parts[i + 3])
                         if w <= 0 or h <= 0:
                             raise ValueError
                         rects.append((x, y, w, h))
@@ -516,6 +558,7 @@ def parse_free_pattern(text):
             else:
                 return None
     return rects
+
 
 # ---------- 主程序 ----------
 class App:
@@ -548,15 +591,15 @@ class App:
         mode_frame.grid(row=2, column=0, columnspan=3, sticky="w", padx=5, pady=5)
         tk.Label(mode_frame, text="切割模式:").pack(side=tk.LEFT)
         self.cut_mode = tk.StringVar(value="grid")
-        
+
         rb_grid = tk.Radiobutton(mode_frame, text="标准网格模式", variable=self.cut_mode,
                                  value="grid", command=self.on_mode_changed)
         rb_grid.pack(side=tk.LEFT, padx=10)
-        
+
         rb_smart = tk.Radiobutton(mode_frame, text="智能数字模式", variable=self.cut_mode,
                                   value="smart", command=self.on_mode_changed)
         rb_smart.pack(side=tk.LEFT, padx=10)
-        ToolTip(rb_smart, 
+        ToolTip(rb_smart,
                 text="【智能数字模式】格式说明\n"
                      "\n"
                      "一、块数指定（两种方式）：\n"
@@ -586,11 +629,11 @@ class App:
                      "注意：紧凑数字串与紧凑比例中的每位数字只能是0-9。\n"
                      "逗号分隔的块数或比例支持整数或小数。",
                 wraplength=500)
-        
+
         rb_advanced = tk.Radiobutton(mode_frame, text="高级嵌套模式", variable=self.cut_mode,
                                      value="advanced", command=self.on_mode_changed)
         rb_advanced.pack(side=tk.LEFT, padx=10)
-        ToolTip(rb_advanced, 
+        ToolTip(rb_advanced,
                 text="【高级嵌套模式】详细说明\n"
                      "\n"
                      "基本格式（组间宽度/高度相等）\n"
@@ -616,7 +659,7 @@ class App:
         rb_free = tk.Radiobutton(mode_frame, text="自由模式", variable=self.cut_mode,
                                  value="free", command=self.on_mode_changed)
         rb_free.pack(side=tk.LEFT, padx=10)
-        ToolTip(rb_free, 
+        ToolTip(rb_free,
                 text="【自由模式】格式说明\n"
                      "每行定义一个矩形：x, y, width, height\n"
                      "支持逗号或分号分隔多个矩形（同一行内用分号）\n"
@@ -671,7 +714,7 @@ class App:
         # 自由模式参数区域（增强交互）
         self.free_frame = tk.LabelFrame(master, text="自由模式参数 (矩形定义)", padx=5, pady=5)
         self.free_frame.grid(row=7, column=0, columnspan=3, sticky="ew", padx=5, pady=5)
-        
+
         # 自由模式交互控件行
         free_controls = tk.Frame(self.free_frame)
         free_controls.pack(fill=tk.X, padx=5, pady=2)
@@ -682,9 +725,8 @@ class App:
         self.ratio_lock_cb = tk.Checkbutton(free_controls, text="锁定比例：", variable=self.lock_ratio,
                                             command=self.on_ratio_lock_changed)
         self.ratio_lock_cb.pack(side=tk.LEFT, padx=5)
-        
-        # 比例输入控件：带预设下拉的输入框，允许手动输入任意比例
 
+        # 比例输入控件：带预设下拉的输入框，允许手动输入任意比例
         self.ratio_var = tk.StringVar(value="16:9")
         self.ratio_entry = tk.Entry(free_controls, textvariable=self.ratio_var, width=8)
         self.ratio_entry.pack(side=tk.LEFT, padx=2)
@@ -695,22 +737,21 @@ class App:
         self.ratio_preset.pack(side=tk.LEFT, padx=2)
         self.ratio_preset.bind("<<ComboboxSelected>>", self.on_preset_ratio)
 
-        
         tk.Button(free_controls, text="清除所有", command=self.clear_all_rects).pack(side=tk.LEFT, padx=5)
         tk.Button(free_controls, text="撤销最后", command=self.delete_last_rect).pack(side=tk.LEFT, padx=2)
-        ToolTip(self.ratio_lock_cb, 
-            "勾选后绘制矩形时将强制保持所输入的比例。\n\n"
-            "比例可以自由输入，也可选择常用预设。\n\n"
-            "格式: 宽:高 (例如 16:9, 10:16, 3.5:2)"
-        )
-        
+        ToolTip(self.ratio_lock_cb,
+                "勾选后绘制矩形时将强制保持所输入的比例。\n\n"
+                "比例可以自由输入，也可选择常用预设。\n\n"
+                "格式: 宽:高 (例如 16:9, 10:16, 3.5:2)"
+                )
+
         # 自由模式文本框
         self.free_text = tk.Text(self.free_frame, height=8, width=60, font=("Consolas", 10))
         self.free_text.pack(fill=tk.BOTH, expand=True, padx=5, pady=5)
         self.free_text.insert("1.0", "10,10,200,150\n250,30,180,200;50,200,300,100")
         self.free_text.bind("<KeyRelease>", self.on_free_param_changed)
         self.on_free_param_changed()
-        
+
         self.free_rects = []
 
         # 输出格式与质量
@@ -736,7 +777,7 @@ class App:
         bottom_frame.grid(row=9, column=0, columnspan=3, pady=10, sticky="ew")
         self.batch_btn = tk.Button(bottom_frame, text="批量", command=self.toggle_batch_panel, width=4, bg="#d9d9d9")
         self.batch_btn.pack(side=tk.LEFT, padx=5)
-        ToolTip(self.batch_btn, 
+        ToolTip(self.batch_btn,
                 "【批量处理模式】\n"
                 "点击按钮展开/收起批量面板，方便批量切割多张图片。\n\n"
                 "使用说明：\n"
@@ -752,7 +793,7 @@ class App:
                 "   - 切割前需指定输出根目录（若未填写，会弹出选择框）。\n",
                 wraplength=600)
         self.preview_btn = tk.Button(bottom_frame, text="打开预览窗口", command=self.toggle_preview_window)
-        self.preview_btn.pack(side=tk.LEFT, padx=(30,5))
+        self.preview_btn.pack(side=tk.LEFT, padx=(30, 5))
         tk.Button(bottom_frame, text="开始切割", command=self.start_cutting).pack(side=tk.LEFT, padx=10)
         tk.Button(bottom_frame, text="恢复默认", command=self.reset_parameters).pack(side=tk.LEFT, padx=10)
         tk.Button(bottom_frame, text="退出", command=self.quit_app).pack(side=tk.LEFT, padx=10)
@@ -773,7 +814,7 @@ class App:
         self.same_dir_cb = tk.Checkbutton(batch_btn_frame, text="输出同目录", variable=self.output_same_dir)
         self.same_dir_cb.pack(side=tk.LEFT, padx=5)
         # 添加详细提示
-        ToolTip(self.same_dir_cb, 
+        ToolTip(self.same_dir_cb,
                 text="【输出同目录】\n"
                      "勾选后，所有切割结果将直接保存在所选输出根目录下，不再为每个源图片创建子文件夹。\n"
                      "文件名格式：{序号}_{模式标识}_{原内部名称}.ext\n"
@@ -784,7 +825,7 @@ class App:
                 wraplength=450)
         # 添加“添加当前图片”按钮
         tk.Button(batch_btn_frame, text="添加当前图片", command=self.add_current_image).pack(side=tk.LEFT, padx=5)
-        
+
         list_frame = tk.Frame(self.batch_frame)
         list_frame.pack(fill=tk.BOTH, expand=True, padx=5, pady=5)
         self.batch_listbox = tk.Listbox(list_frame, selectmode=tk.EXTENDED, height=8)
@@ -807,9 +848,30 @@ class App:
         self.start_y = None
         self.rect_id = None
 
+        self.cancel_flag = False  # 单张切割取消标志
+        self.batch_cancel_flag = False  # 批量切割取消标志
+
         self.on_mode_changed()
         self.update_dir_frame_visibility()
         master.protocol("WM_DELETE_WINDOW", self.quit_app)
+
+    # ---------- 单张切割取消相关 ----------
+    def request_cancel(self):
+        """请求取消当前切割"""
+        self.cancel_flag = True
+        if hasattr(self, 'progress_win') and self.progress_win.winfo_exists():
+            for child in self.progress_win.winfo_children():
+                if isinstance(child, tk.Button) and child.cget("text") == "取消":
+                    child.config(text="正在取消...", state=tk.DISABLED)
+
+    # ---------- 批量切割取消相关 ----------
+    def request_batch_cancel(self):
+        """请求取消批量切割"""
+        self.batch_cancel_flag = True
+        if hasattr(self, 'batch_progress_win') and self.batch_progress_win.winfo_exists():
+            for child in self.batch_progress_win.winfo_children():
+                if isinstance(child, tk.Button) and child.cget("text") == "取消":
+                    child.config(text="正在取消...", state=tk.DISABLED)
 
     # ---------- 批量模式方法 ----------
     def toggle_batch_panel(self):
@@ -847,7 +909,7 @@ class App:
         template = self.capture_current_template()
         item = BatchItem(filepath, template)
         self.batch_items.append(item)
-        mode_name = {"grid":"网格", "smart":"智能", "advanced":"高级", "free":"自由"}.get(template["mode"], template["mode"])
+        mode_name = {"grid": "网格", "smart": "智能", "advanced": "高级", "free": "自由"}.get(template["mode"], template["mode"])
         # 显示详细信息
         detail = ""
         if template["mode"] == "grid":
@@ -923,64 +985,74 @@ class App:
             base_out_dir = filedialog.askdirectory(title="选择批量输出的根目录")
             if not base_out_dir:
                 return
-    
+
         total = len(self.batch_items)
         # 创建进度窗口
         self.batch_progress_win = tk.Toplevel(self.master)
         self.batch_progress_win.title("批量切割进度")
         self.batch_progress_win.transient(self.master)
         self.batch_progress_win.grab_set()
-        self.batch_progress_win.geometry("350x120")
+        self.batch_progress_win.geometry("350x150")
         self.batch_progress_win.update_idletasks()
         x = (self.batch_progress_win.winfo_screenwidth() - 350) // 2
-        y = (self.batch_progress_win.winfo_screenheight() - 120) // 2
+        y = (self.batch_progress_win.winfo_screenheight() - 150) // 2
         self.batch_progress_win.geometry(f"+{x}+{y}")
         tk.Label(self.batch_progress_win, text=f"批量切割进行中，共 {total} 个文件").pack(pady=5)
         self.batch_progress_var = tk.IntVar(value=0)
-        self.batch_progress_bar = ttk.Progressbar(self.batch_progress_win, variable=self.batch_progress_var, maximum=total, length=300)
+        self.batch_progress_bar = ttk.Progressbar(self.batch_progress_win, variable=self.batch_progress_var,
+                                                  maximum=total, length=300)
         self.batch_progress_bar.pack(pady=5)
         self.batch_progress_label = tk.Label(self.batch_progress_win, text="0 / {}".format(total))
         self.batch_progress_label.pack(pady=5)
-    
+
+        # 取消按钮
+        tk.Button(self.batch_progress_win, text="取消", command=self.request_batch_cancel).pack(pady=5)
+
         # 禁用批量相关按钮
         for btn in self.master.winfo_children():
             if isinstance(btn, tk.Button) and btn.cget("text") in ("开始批量切割", "批量"):
                 btn.config(state=tk.DISABLED)
-    
-        self.cancel_batch = False
+
+        self.batch_cancel_flag = False
         threading.Thread(target=self._batch_worker, args=(base_out_dir, total), daemon=True).start()
 
     def _batch_worker(self, base_out_dir, total):
         success_count = 0
         errors = []
         for idx, item in enumerate(self.batch_items, 1):
-            if getattr(self, 'cancel_batch', False):
+            if self.batch_cancel_flag:
                 break
             try:
-                self.process_batch_item(item, base_out_dir, idx)
+                # 传递 stop_check 以便在切割过程中也能取消
+                self.process_batch_item(item, base_out_dir, idx, stop_check=lambda: self.batch_cancel_flag)
                 success_count += 1
+            except StopCutting:
+                # 用户取消了批量切割，不再继续
+                break
             except Exception as e:
                 errors.append(f"{item.filepath}: {str(e)}")
             self.master.after(0, self._batch_update_progress, idx)
-        self.master.after(0, self._batch_done, success_count, total, errors)
-    
+        self.master.after(0, self._batch_done, success_count, total, errors, self.batch_cancel_flag)
+
     def _batch_update_progress(self, current):
         if hasattr(self, 'batch_progress_win') and self.batch_progress_win.winfo_exists():
             self.batch_progress_var.set(current)
             self.batch_progress_label.config(text=f"{current} / {self.batch_progress_var.get('maximum')}")
             self.batch_progress_win.update_idletasks()
-    
-    def _batch_done(self, success_count, total, errors):
+
+    def _batch_done(self, success_count, total, errors, cancelled):
         # 恢复按钮
         for btn in self.master.winfo_children():
             if isinstance(btn, tk.Button) and btn.cget("text") in ("开始批量切割", "批量"):
                 btn.config(state=tk.NORMAL)
-    
+
         if hasattr(self, 'batch_progress_win') and self.batch_progress_win.winfo_exists():
             self.batch_progress_win.destroy()
             self.batch_progress_win = None
-    
-        if errors:
+
+        if cancelled:
+            messagebox.showinfo("已取消", f"批量切割已取消，已完成 {success_count}/{total} 个文件")
+        elif errors:
             err_msg = "\n".join(errors[:5])
             if len(errors) > 5:
                 err_msg += f"\n... 共 {len(errors)} 个错误"
@@ -988,27 +1060,24 @@ class App:
         else:
             messagebox.showinfo("批量完成", f"成功处理 {success_count}/{total} 个文件")
 
-
-
-    def process_batch_item(self, item, base_out_dir, seq_num):
+    def process_batch_item(self, item, base_out_dir, seq_num, stop_check=None):
         img = Image.open(item.filepath)
         template = item.template
         mode = template["mode"]
         fmt = template.get("format", "WEBP")
         quality = template.get("quality", "85")
-        
+
         # 根据复选框决定输出目录和文件前缀
         if self.output_same_dir.get():
             out_dir = base_out_dir
-            # 模式标识
-            mode_flag = {"grid":"G", "smart":"S", "advanced":"A", "free":"F"}.get(mode, "X")
+            mode_flag = {"grid": "G", "smart": "S", "advanced": "A", "free": "F"}.get(mode, "X")
             prefix = f"{seq_num:03d}_{mode_flag}"
         else:
             basename = os.path.splitext(os.path.basename(item.filepath))[0]
             out_dir = os.path.join(base_out_dir, basename)
-            prefix = ""  # 无前缀
+            prefix = ""
         os.makedirs(out_dir, exist_ok=True)
-        
+
         save_params = {"format": fmt}
         if fmt == "JPEG":
             try:
@@ -1031,30 +1100,30 @@ class App:
         ext = fmt.lower()
         if fmt in ("JPEG", "WEBP") and img.mode in ("RGBA", "LA", "P"):
             img = img.convert("RGB")
-        
+
         if mode == "grid":
             rows = int(template["rows"])
             cols = int(template["cols"])
-            cut_grid(img, rows, cols, out_dir, ext, save_params, None, prefix)
+            cut_grid(img, rows, cols, out_dir, ext, save_params, None, prefix, stop_check)
         elif mode == "smart":
             digit_entry = template["digit_entry"]
             direction = template.get("direction", "horizontal")
             blocks, ratios = parse_smart_pattern(digit_entry)
             if blocks is None:
                 raise ValueError("智能数字模式输入格式错误")
-            cut_smart(img, blocks, ratios, direction, out_dir, ext, save_params, None, prefix)
+            cut_smart(img, blocks, ratios, direction, out_dir, ext, save_params, None, prefix, stop_check)
         elif mode == "advanced":
             advanced_text = template["advanced_text"]
             direction = template.get("direction", "horizontal")
             group_ratios, pattern = parse_advanced_pattern(advanced_text)
             if pattern is None:
                 raise ValueError("高级嵌套模式输入格式错误")
-            cut_advanced(img, pattern, group_ratios, direction, out_dir, ext, save_params, None, prefix)
+            cut_advanced(img, pattern, group_ratios, direction, out_dir, ext, save_params, None, prefix, stop_check)
         elif mode == "free":
             rects = template.get("free_rects", [])
             if not rects:
                 raise ValueError("自由模式下未定义矩形")
-            cut_free(img, rects, out_dir, ext, save_params, None, prefix)
+            cut_free(img, rects, out_dir, ext, save_params, None, prefix, stop_check)
 
     # ---------- 其他原有方法 ----------
     def reset_parameters(self):
@@ -1080,6 +1149,7 @@ class App:
         self.refresh_preview()
         self.master.update_idletasks()
         self.master.geometry("")
+
     def toggle_preview_window(self):
         if self.preview_window is not None and self.preview_window.winfo_exists():
             self.close_preview_window()
@@ -1087,7 +1157,7 @@ class App:
         else:
             self.open_preview_window()
             self.preview_btn.config(text="关闭预览窗口")
-    
+
     def resize_preview_window_for_image(self):
         if not self.preview_window or not self.preview_window.winfo_exists():
             return
@@ -1114,6 +1184,7 @@ class App:
         if pos_y + new_h > screen_h:
             pos_y = max(10, screen_h - new_h - 10)
         self.preview_window.geometry(f"{new_w}x{new_h}+{pos_x}+{pos_y}")
+
     def open_preview_window(self):
         if self.preview_window is not None and self.preview_window.winfo_exists():
             self.preview_window.lift()
@@ -1157,6 +1228,7 @@ class App:
         if self.cut_mode.get() == "free" and self.drawing_enabled:
             self.toggle_interactive_mode()
             self.toggle_interactive_mode()
+
     def close_preview_window(self):
         if self.preview_window:
             self.preview_window.destroy()
@@ -1165,9 +1237,11 @@ class App:
         self.preview_btn.config(text="打开预览窗口")
         self.drawing_enabled = False
         self.interactive_btn.config(text="启用交互绘制", bg="#f0f0f0")
+
     def on_preview_canvas_resize(self, event):
         if self.original_img and self.preview_canvas:
             self.update_preview_in_subwindow()
+
     def update_preview_in_subwindow(self):
         if not self.original_img or not self.preview_canvas:
             return
@@ -1195,6 +1269,7 @@ class App:
             self.draw_advanced_lines_sub()
         else:
             self.draw_free_lines_sub()
+
     def draw_grid_lines_sub(self):
         if not self.original_img or not self.preview_canvas:
             return
@@ -1211,10 +1286,11 @@ class App:
         row_h = ph / rows
         for i in range(1, cols):
             line_x = x0 + i * col_w
-            self.preview_canvas.create_line(line_x, y0, line_x, y0+ph, fill="red", width=2, tags="cut_line")
+            self.preview_canvas.create_line(line_x, y0, line_x, y0 + ph, fill="red", width=2, tags="cut_line")
         for i in range(1, rows):
             line_y = y0 + i * row_h
-            self.preview_canvas.create_line(x0, line_y, x0+pw, line_y, fill="red", width=2, tags="cut_line")
+            self.preview_canvas.create_line(x0, line_y, x0 + pw, line_y, fill="red", width=2, tags="cut_line")
+
     def draw_smart_lines_sub(self):
         if not self.original_img or not self.preview_canvas:
             return
@@ -1234,10 +1310,10 @@ class App:
             for i in range(n):
                 cum_x.append(cum_x[-1] + col_widths[i])
             for i in range(1, n):
-                self.preview_canvas.create_line(cum_x[i], y0, cum_x[i], y0+ph, fill="red", width=2, tags="cut_line")
+                self.preview_canvas.create_line(cum_x[i], y0, cum_x[i], y0 + ph, fill="red", width=2, tags="cut_line")
             for col_idx, blk in enumerate(blocks):
                 left = cum_x[col_idx]
-                right = cum_x[col_idx+1]
+                right = cum_x[col_idx + 1]
                 blk_h = ph / blk
                 for b in range(1, blk):
                     line_y = y0 + b * blk_h
@@ -1252,10 +1328,10 @@ class App:
             for i in range(n):
                 cum_y.append(cum_y[-1] + row_heights[i])
             for i in range(1, n):
-                self.preview_canvas.create_line(x0, cum_y[i], x0+pw, cum_y[i], fill="red", width=2, tags="cut_line")
+                self.preview_canvas.create_line(x0, cum_y[i], x0 + pw, cum_y[i], fill="red", width=2, tags="cut_line")
             for row_idx, blk in enumerate(blocks):
                 top = cum_y[row_idx]
-                bottom = cum_y[row_idx+1]
+                bottom = cum_y[row_idx + 1]
                 blk_w = pw / blk
                 for b in range(1, blk):
                     line_x = x0 + b * blk_w
@@ -1297,22 +1373,24 @@ class App:
             for w in col_widths:
                 cum_x.append(cum_x[-1] + w)
             for i in range(1, n):
-                self.preview_canvas.create_line(cum_x[i], y0, cum_x[i], y0+ph, fill="red", width=2, tags="cut_line")
+                self.preview_canvas.create_line(cum_x[i], y0, cum_x[i], y0 + ph, fill="red", width=2, tags="cut_line")
             for col_idx, (blk, ratios) in enumerate(pattern):
                 left = cum_x[col_idx]
-                right = cum_x[col_idx+1]
+                right = cum_x[col_idx + 1]
                 if ratios is None:
                     blk_h = ph / blk
                     for b in range(1, blk):
                         line_y = y0 + b * blk_h
-                        self.preview_canvas.create_line(left, line_y, right, line_y, fill="blue", width=2, tags="cut_line")
+                        self.preview_canvas.create_line(left, line_y, right, line_y, fill="blue", width=2,
+                                                        tags="cut_line")
                 else:
                     cum_y = y0
                     for b, r in enumerate(ratios):
                         seg_h = ph * (r[0] / 100.0)
                         next_y = cum_y + seg_h
                         if b < blk - 1:
-                            self.preview_canvas.create_line(left, next_y, right, next_y, fill="blue", width=2, tags="cut_line")
+                            self.preview_canvas.create_line(left, next_y, right, next_y, fill="blue", width=2,
+                                                            tags="cut_line")
                         cum_y = next_y
         else:
             n = len(pattern)
@@ -1324,23 +1402,26 @@ class App:
             for h in row_heights:
                 cum_y.append(cum_y[-1] + h)
             for i in range(1, n):
-                self.preview_canvas.create_line(x0, cum_y[i], x0+pw, cum_y[i], fill="red", width=2, tags="cut_line")
+                self.preview_canvas.create_line(x0, cum_y[i], x0 + pw, cum_y[i], fill="red", width=2, tags="cut_line")
             for row_idx, (blk, ratios) in enumerate(pattern):
                 top = cum_y[row_idx]
-                bottom = cum_y[row_idx+1]
+                bottom = cum_y[row_idx + 1]
                 if ratios is None:
                     blk_w = pw / blk
                     for b in range(1, blk):
                         line_x = x0 + b * blk_w
-                        self.preview_canvas.create_line(line_x, top, line_x, bottom, fill="blue", width=2, tags="cut_line")
+                        self.preview_canvas.create_line(line_x, top, line_x, bottom, fill="blue", width=2,
+                                                        tags="cut_line")
                 else:
                     cum_x = x0
                     for b, r in enumerate(ratios):
                         seg_w = pw * (r[0] / 100.0)
                         next_x = cum_x + seg_w
                         if b < blk - 1:
-                            self.preview_canvas.create_line(next_x, top, next_x, bottom, fill="blue", width=2, tags="cut_line")
+                            self.preview_canvas.create_line(next_x, top, next_x, bottom, fill="blue", width=2,
+                                                            tags="cut_line")
                         cum_x = next_x
+
     def draw_free_lines_sub(self):
         if not self.original_img or not self.preview_canvas:
             return
@@ -1361,8 +1442,9 @@ class App:
                                                  display_x + display_w, display_y + display_h,
                                                  outline="green", width=2, tags="cut_line")
             self.preview_canvas.create_text(display_x + 5, display_y + 5,
-                                            text=str(idx+1), anchor="nw",
+                                            text=str(idx + 1), anchor="nw",
                                             fill="green", font=("", 10, "bold"), tags="cut_line")
+
     # 事件处理
     def on_mode_changed(self):
         self.update_dir_frame_visibility()
@@ -1392,17 +1474,22 @@ class App:
             self.on_free_param_changed()
         self.master.update_idletasks()
         self.master.geometry("")
+
     def on_dir_changed(self):
         self.refresh_preview()
+
     def on_grid_param_changed(self, event=None):
         if self.cut_mode.get() == "grid":
             self.refresh_preview()
+
     def on_smart_param_changed(self, event=None):
         if self.cut_mode.get() == "smart":
             self.refresh_preview()
+
     def on_advanced_param_changed(self, event=None):
         if self.cut_mode.get() == "advanced":
             self.refresh_preview()
+
     def on_free_param_changed(self, event=None):
         if self.cut_mode.get() == "free":
             rects = parse_free_pattern(self.free_text.get("1.0", tk.END).strip())
@@ -1411,14 +1498,17 @@ class App:
                 return
             self.free_rects = rects
             self.refresh_preview()
+
     def update_dir_frame_visibility(self):
         if self.cut_mode.get() in ("grid", "free"):
             self.dir_frame.grid_remove()
         else:
             self.dir_frame.grid()
+
     def refresh_preview(self):
         if self.preview_window and self.preview_canvas and self.original_img:
             self.update_preview_in_subwindow()
+
     # 图片加载
     def load_preview_image(self, file_path):
         if not file_path or not os.path.isfile(file_path):
@@ -1435,6 +1525,7 @@ class App:
                 self.refresh_preview()
         except Exception as e:
             messagebox.showerror("错误", f"图片加载失败: {e}")
+
     # 文件操作
     def select_file(self):
         path = filedialog.askopenfilename(
@@ -1451,6 +1542,7 @@ class App:
             self.entry1.delete(0, tk.END)
             self.entry1.insert(0, path)
             self.load_preview_image(path)
+
     def on_drop_to_entry1(self, event):
         files = self.master.tk.splitlist(event.data)
         if files and os.path.isfile(files[0]):
@@ -1461,11 +1553,13 @@ class App:
             self.entry1.delete(0, tk.END)
             self.entry1.insert(0, filepath)
             self.load_preview_image(filepath)
+
     def select_folder(self):
         path = filedialog.askdirectory()
         if path:
             self.entry2.delete(0, tk.END)
             self.entry2.insert(0, path)
+
     def on_drop_to_entry2(self, event):
         items = self.master.tk.splitlist(event.data)
         if items:
@@ -1476,6 +1570,7 @@ class App:
             elif os.path.isfile(p):
                 self.entry2.delete(0, tk.END)
                 self.entry2.insert(0, os.path.dirname(p))
+
     def on_format_change(self, event=None):
         fmt = self.format_var.get()
         if fmt == "JPEG":
@@ -1489,6 +1584,7 @@ class App:
             self.hint_label.config(text="(WebP质量 1-100，推荐80)")
         else:
             self.hint_label.config(text="(此格式忽略质量参数)")
+
     def get_save_params(self, fmt):
         params = {"format": fmt}
         qs = self.quality_var.get().strip()
@@ -1511,29 +1607,6 @@ class App:
             except:
                 params["quality"] = 80
         return params
-    def create_progress_dialog(self, total):
-        self.progress_win = tk.Toplevel(self.master)
-        self.progress_win.title("切割进度")
-        self.progress_win.transient(self.master)
-        self.progress_win.grab_set()
-        self.progress_win.geometry("300x100")
-        self.progress_win.update_idletasks()
-        w = self.progress_win.winfo_width()
-        h = self.progress_win.winfo_height()
-        x = (self.progress_win.winfo_screenwidth() - w) // 2
-        y = (self.progress_win.winfo_screenheight() - h) // 2
-        self.progress_win.geometry(f"+{x}+{y}")
-        tk.Label(self.progress_win, text=f"正在切割，共 {total} 张...").pack(pady=5)
-        self.progress_var = tk.IntVar(value=0)
-        self.progress_bar = ttk.Progressbar(self.progress_win, variable=self.progress_var, maximum=total, length=250)
-        self.progress_bar.pack(pady=5)
-        self.progress_label = tk.Label(self.progress_win, text="0 / {}".format(total))
-        self.progress_label.pack(pady=5)
-        def update_progress(current):
-            self.progress_var.set(current)
-            self.progress_label.config(text=f"{current} / {total}")
-            self.progress_win.update_idletasks()
-        return update_progress
 
     def start_cutting(self):
         img_path = self.entry1.get().strip()
@@ -1550,7 +1623,7 @@ class App:
             messagebox.showerror("错误", f"保存目录不存在: {out_dir}")
             return
         os.makedirs(out_dir, exist_ok=True)
-    
+
         try:
             image = Image.open(img_path)
             fmt = self.format_var.get()
@@ -1559,7 +1632,7 @@ class App:
             save_params = self.get_save_params(fmt)
             ext = fmt.lower()
             mode = self.cut_mode.get()
-    
+
             # 计算总块数（用于进度条）
             if mode == "grid":
                 rows = int(self.rows_entry.get())
@@ -1585,13 +1658,13 @@ class App:
                 if rects is None:
                     raise ValueError("自由模式矩形定义错误")
                 total_pieces = len(rects)
-    
-            # 创建进度窗口（稍后由后台线程更新）
+
+            # 创建进度窗口
             self.progress_win = tk.Toplevel(self.master)
             self.progress_win.title("切割进度")
             self.progress_win.transient(self.master)
             self.progress_win.grab_set()
-            self.progress_win.geometry("300x100")
+            self.progress_win.geometry("300x130")
             self.progress_win.update_idletasks()
             w = self.progress_win.winfo_width()
             h = self.progress_win.winfo_height()
@@ -1600,22 +1673,26 @@ class App:
             self.progress_win.geometry(f"+{x}+{y}")
             tk.Label(self.progress_win, text=f"正在切割，共 {total_pieces} 张...").pack(pady=5)
             self.progress_var = tk.IntVar(value=0)
-            self.progress_bar = ttk.Progressbar(self.progress_win, variable=self.progress_var, maximum=total_pieces, length=250)
+            self.progress_bar = ttk.Progressbar(self.progress_win, variable=self.progress_var, maximum=total_pieces,
+                                                length=250)
             self.progress_bar.pack(pady=5)
             self.progress_label = tk.Label(self.progress_win, text="0 / {}".format(total_pieces))
             self.progress_label.pack(pady=5)
-    
+
+            # 取消按钮
+            tk.Button(self.progress_win, text="取消", command=self.request_cancel).pack(pady=5)
+
             # 禁用开始按钮，防止重复启动
             for btn in self.master.winfo_children():
                 if isinstance(btn, tk.Button) and btn.cget("text") in ("开始切割", "批量"):
                     btn.config(state=tk.DISABLED)
-    
+
             # 启动后台线程
-            self.cancel_cut = False
+            self.cancel_flag = False
             threading.Thread(target=self._cut_worker, args=(
                 image, mode, out_dir, ext, save_params, total_pieces
             ), daemon=True).start()
-    
+
         except Exception as e:
             messagebox.showerror("错误", f"准备切割时出错: {e}")
             if hasattr(self, 'progress_win') and self.progress_win.winfo_exists():
@@ -1623,22 +1700,25 @@ class App:
 
     def _cut_worker(self, image, mode, out_dir, ext, save_params, total_pieces):
         try:
-            # 进度回调（线程安全）
             def progress_callback(current):
                 self.master.after(0, self._update_progress, current)
-    
+
+            stop_check = lambda: self.cancel_flag
+
             if mode == "grid":
                 rows = int(self.rows_entry.get())
                 cols = int(self.cols_entry.get())
-                cut_grid(image, rows, cols, out_dir, ext, save_params, progress_callback)
-                msg = f"标准网格切割完成！共生成 {rows*cols} 张小图"
+                cut_grid(image, rows, cols, out_dir, ext, save_params, progress_callback, "", stop_check)
+                msg = f"标准网格切割完成！共生成 {rows * cols} 张小图"
             elif mode == "smart":
                 blocks, ratios = parse_smart_pattern(self.digit_entry.get().strip())
-                cut_smart(image, blocks, ratios, self.direction.get(), out_dir, ext, save_params, progress_callback)
+                cut_smart(image, blocks, ratios, self.direction.get(), out_dir, ext, save_params,
+                          progress_callback, "", stop_check)
                 msg = f"智能数字模式切割完成！共生成 {sum(blocks)} 张小图"
             elif mode == "advanced":
                 group_ratios, pattern = parse_advanced_pattern(self.advanced_text.get("1.0", tk.END).strip())
-                cut_advanced(image, pattern, group_ratios, self.direction.get(), out_dir, ext, save_params, progress_callback)
+                cut_advanced(image, pattern, group_ratios, self.direction.get(), out_dir, ext, save_params,
+                             progress_callback, "", stop_check)
                 total = 0
                 for blk, ratios in pattern:
                     if ratios is None:
@@ -1648,11 +1728,13 @@ class App:
                 msg = f"高级嵌套模式切割完成！共生成 {total} 张小图"
             else:
                 rects = self.free_rects
-                cut_free(image, rects, out_dir, ext, save_params, progress_callback)
+                cut_free(image, rects, out_dir, ext, save_params, progress_callback, "", stop_check)
                 msg = f"自由模式切割完成！共生成 {len(rects)} 张小图"
-    
+
             self.master.after(0, self._cut_done, True, msg, out_dir)
-    
+
+        except StopCutting:
+            self.master.after(0, self._cut_cancelled)
         except Exception as e:
             self.master.after(0, self._cut_done, False, str(e), None)
 
@@ -1661,26 +1743,38 @@ class App:
             self.progress_var.set(current)
             self.progress_label.config(text=f"{current} / {self.progress_var.get('maximum')}")
             self.progress_win.update_idletasks()
-    
+
     def _cut_done(self, success, info, out_dir=None):
         # 恢复按钮
         for btn in self.master.winfo_children():
             if isinstance(btn, tk.Button) and btn.cget("text") in ("开始切割", "批量"):
                 btn.config(state=tk.NORMAL)
-    
+
         if hasattr(self, 'progress_win') and self.progress_win.winfo_exists():
             self.progress_win.destroy()
             self.progress_win = None
-    
+
         if success:
             messagebox.showinfo("完成", f"{info}\n格式：{self.format_var.get()}\n保存在：{out_dir}")
         else:
             messagebox.showerror("错误", f"切割失败: {info}")
 
+    def _cut_cancelled(self):
+        # 恢复按钮
+        for btn in self.master.winfo_children():
+            if isinstance(btn, tk.Button) and btn.cget("text") in ("开始切割", "批量"):
+                btn.config(state=tk.NORMAL)
+
+        if hasattr(self, 'progress_win') and self.progress_win.winfo_exists():
+            self.progress_win.destroy()
+            self.progress_win = None
+
+        messagebox.showinfo("已取消", "切割操作已被用户取消")
 
     # 交互绘制方法（自由模式）
     def on_preset_ratio(self, event=None):
         self.ratio_var.set(self.ratio_preset.get())
+
     def parse_ratio(self, ratio_str):
         ratio_str = ratio_str.strip()
         if ':' not in ratio_str:
@@ -1694,6 +1788,7 @@ class App:
             return w / h
         except:
             return None
+
     def toggle_interactive_mode(self):
         if self.cut_mode.get() != "free":
             messagebox.showinfo("提示", "交互绘制仅在自由模式下可用")
@@ -1718,6 +1813,7 @@ class App:
             if self.rect_id:
                 self.preview_canvas.delete(self.rect_id)
                 self.rect_id = None
+
     def on_mouse_down(self, event):
         if not self.drawing_enabled or not self.original_img:
             return
@@ -1732,6 +1828,7 @@ class App:
             self.start_x, self.start_y, self.start_x, self.start_y,
             outline="orange", width=2, tags="temp_rect"
         )
+
     def on_mouse_move(self, event):
         if self.start_x is None or self.rect_id is None:
             return
@@ -1761,6 +1858,7 @@ class App:
                 canvas_x = max(x0, min(x0 + w, canvas_x))
                 canvas_y = max(y0, min(y0 + h, canvas_y))
         self.preview_canvas.coords(self.rect_id, self.start_x, self.start_y, canvas_x, canvas_y)
+
     def on_mouse_up(self, event):
         if self.start_x is None or self.rect_id is None:
             return
@@ -1812,20 +1910,24 @@ class App:
         self.rect_id = None
         self.start_x = None
         self.start_y = None
+
     def delete_selected_rect(self, event):
         if self.free_rects:
             self.free_rects.pop()
             self.update_free_text_from_rects()
             self.refresh_preview()
+
     def clear_all_rects(self):
         self.free_rects.clear()
         self.update_free_text_from_rects()
         self.refresh_preview()
+
     def delete_last_rect(self):
         if self.free_rects:
             self.free_rects.pop()
             self.update_free_text_from_rects()
             self.refresh_preview()
+
     def update_free_text_from_rects(self):
         lines = []
         for x, y, w, h in self.free_rects:
@@ -1833,12 +1935,18 @@ class App:
         self.free_text.delete("1.0", tk.END)
         self.free_text.insert("1.0", "\n".join(lines))
         self.on_free_param_changed()
+
     def on_ratio_lock_changed(self):
         pass
+
     def quit_app(self):
+        # 强制停止所有后台任务（设置标志）
+        self.cancel_flag = True
+        self.batch_cancel_flag = True
         if self.preview_window:
             self.preview_window.destroy()
         self.master.destroy()
+
 
 def center_window(win):
     win.update_idletasks()
