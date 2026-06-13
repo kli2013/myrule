@@ -4,7 +4,8 @@ from PIL import Image, ImageTk
 import os
 import re
 import ast
-import sys  # 在文件开头导入（如果没有）
+import sys
+import threading
 
 try:
     from tkinterdnd2 import TkinterDnD, DND_FILES
@@ -149,7 +150,7 @@ def cut_smart(img, blocks, ratios, direction, out_dir, ext, save_params, progres
             for blk_idx, seg_h in enumerate(heights):
                 bottom = top + seg_h
                 cropped = img.crop((left, top, right, bottom))
-                name = f"c{col_idx+1}_r{blk_idx+1}"
+                name = f"S_c{col_idx+1}_r{blk_idx+1}"
                 if file_prefix:
                     name = f"{file_prefix}_{name}"
                 cropped.save(os.path.join(out_dir, f"{name}.{ext}"), **save_params)
@@ -187,7 +188,7 @@ def cut_smart(img, blocks, ratios, direction, out_dir, ext, save_params, progres
             for blk_idx, seg_w in enumerate(widths):
                 right = left + seg_w
                 cropped = img.crop((left, top, right, bottom))
-                name = f"r{row_idx+1}_c{blk_idx+1}"
+                name = f"S_r{row_idx+1}_c{blk_idx+1}"
                 if file_prefix:
                     name = f"{file_prefix}_{name}"
                 cropped.save(os.path.join(out_dir, f"{name}.{ext}"), **save_params)
@@ -239,7 +240,7 @@ def cut_advanced(img, pattern, group_ratios, direction, out_dir, ext, save_param
                 for blk_idx, seg_h in enumerate(heights):
                     bottom = top + seg_h
                     cropped = img.crop((left, top, right, bottom))
-                    name = f"c{col_idx+1}_r{blk_idx+1}"
+                    name = f"A_c{col_idx+1}_r{blk_idx+1}"
                     if file_prefix:
                         name = f"{file_prefix}_{name}"
                     cropped.save(os.path.join(out_dir, f"{name}.{ext}"), **save_params)
@@ -262,7 +263,7 @@ def cut_advanced(img, pattern, group_ratios, direction, out_dir, ext, save_param
                     bottom = top + seg_h
                     if ratios[blk_idx][1]:
                         cropped = img.crop((left, top, right, bottom))
-                        name = f"c{col_idx+1}_r{blk_idx+1}"
+                        name = f"A_c{col_idx+1}_r{blk_idx+1}"
                         if file_prefix:
                             name = f"{file_prefix}_{name}"
                         cropped.save(os.path.join(out_dir, f"{name}.{ext}"), **save_params)
@@ -301,7 +302,7 @@ def cut_advanced(img, pattern, group_ratios, direction, out_dir, ext, save_param
                 for blk_idx, seg_w in enumerate(widths):
                     right = left + seg_w
                     cropped = img.crop((left, top, right, bottom))
-                    name = f"r{row_idx+1}_c{blk_idx+1}"
+                    name = f"A_r{row_idx+1}_c{blk_idx+1}"
                     if file_prefix:
                         name = f"{file_prefix}_{name}"
                     cropped.save(os.path.join(out_dir, f"{name}.{ext}"), **save_params)
@@ -324,7 +325,7 @@ def cut_advanced(img, pattern, group_ratios, direction, out_dir, ext, save_param
                     right = left + seg_w
                     if ratios[blk_idx][1]:
                         cropped = img.crop((left, top, right, bottom))
-                        name = f"r{row_idx+1}_c{blk_idx+1}"
+                        name = f"A_r{row_idx+1}_c{blk_idx+1}"
                         if file_prefix:
                             name = f"{file_prefix}_{name}"
                         cropped.save(os.path.join(out_dir, f"{name}.{ext}"), **save_params)
@@ -922,20 +923,72 @@ class App:
             base_out_dir = filedialog.askdirectory(title="选择批量输出的根目录")
             if not base_out_dir:
                 return
+    
         total = len(self.batch_items)
-        update_progress = self.create_progress_dialog(total)
-        self.master.update_idletasks()
+        # 创建进度窗口
+        self.batch_progress_win = tk.Toplevel(self.master)
+        self.batch_progress_win.title("批量切割进度")
+        self.batch_progress_win.transient(self.master)
+        self.batch_progress_win.grab_set()
+        self.batch_progress_win.geometry("350x120")
+        self.batch_progress_win.update_idletasks()
+        x = (self.batch_progress_win.winfo_screenwidth() - 350) // 2
+        y = (self.batch_progress_win.winfo_screenheight() - 120) // 2
+        self.batch_progress_win.geometry(f"+{x}+{y}")
+        tk.Label(self.batch_progress_win, text=f"批量切割进行中，共 {total} 个文件").pack(pady=5)
+        self.batch_progress_var = tk.IntVar(value=0)
+        self.batch_progress_bar = ttk.Progressbar(self.batch_progress_win, variable=self.batch_progress_var, maximum=total, length=300)
+        self.batch_progress_bar.pack(pady=5)
+        self.batch_progress_label = tk.Label(self.batch_progress_win, text="0 / {}".format(total))
+        self.batch_progress_label.pack(pady=5)
+    
+        # 禁用批量相关按钮
+        for btn in self.master.winfo_children():
+            if isinstance(btn, tk.Button) and btn.cget("text") in ("开始批量切割", "批量"):
+                btn.config(state=tk.DISABLED)
+    
+        self.cancel_batch = False
+        threading.Thread(target=self._batch_worker, args=(base_out_dir, total), daemon=True).start()
+
+    def _batch_worker(self, base_out_dir, total):
         success_count = 0
-        for idx, item in enumerate(self.batch_items):
+        errors = []
+        for idx, item in enumerate(self.batch_items, 1):
+            if getattr(self, 'cancel_batch', False):
+                break
             try:
-                self.process_batch_item(item, base_out_dir, idx+1)
+                self.process_batch_item(item, base_out_dir, idx)
                 success_count += 1
             except Exception as e:
-                messagebox.showerror("错误", f"处理 {item.filepath} 时出错：\n{str(e)}")
-            update_progress(idx+1)
-        if hasattr(self, 'progress_win') and self.progress_win.winfo_exists():
-            self.progress_win.destroy()
-        messagebox.showinfo("批量完成", f"成功处理 {success_count}/{total} 个文件")
+                errors.append(f"{item.filepath}: {str(e)}")
+            self.master.after(0, self._batch_update_progress, idx)
+        self.master.after(0, self._batch_done, success_count, total, errors)
+    
+    def _batch_update_progress(self, current):
+        if hasattr(self, 'batch_progress_win') and self.batch_progress_win.winfo_exists():
+            self.batch_progress_var.set(current)
+            self.batch_progress_label.config(text=f"{current} / {self.batch_progress_var.get('maximum')}")
+            self.batch_progress_win.update_idletasks()
+    
+    def _batch_done(self, success_count, total, errors):
+        # 恢复按钮
+        for btn in self.master.winfo_children():
+            if isinstance(btn, tk.Button) and btn.cget("text") in ("开始批量切割", "批量"):
+                btn.config(state=tk.NORMAL)
+    
+        if hasattr(self, 'batch_progress_win') and self.batch_progress_win.winfo_exists():
+            self.batch_progress_win.destroy()
+            self.batch_progress_win = None
+    
+        if errors:
+            err_msg = "\n".join(errors[:5])
+            if len(errors) > 5:
+                err_msg += f"\n... 共 {len(errors)} 个错误"
+            messagebox.showerror("批量切割完成（有错误）", f"成功 {success_count}/{total} 个文件\n错误详情：\n{err_msg}")
+        else:
+            messagebox.showinfo("批量完成", f"成功处理 {success_count}/{total} 个文件")
+
+
 
     def process_batch_item(self, item, base_out_dir, seq_num):
         img = Image.open(item.filepath)
@@ -1497,6 +1550,7 @@ class App:
             messagebox.showerror("错误", f"保存目录不存在: {out_dir}")
             return
         os.makedirs(out_dir, exist_ok=True)
+    
         try:
             image = Image.open(img_path)
             fmt = self.format_var.get()
@@ -1505,7 +1559,8 @@ class App:
             save_params = self.get_save_params(fmt)
             ext = fmt.lower()
             mode = self.cut_mode.get()
-            total_pieces = 0
+    
+            # 计算总块数（用于进度条）
             if mode == "grid":
                 rows = int(self.rows_entry.get())
                 cols = int(self.cols_entry.get())
@@ -1530,20 +1585,60 @@ class App:
                 if rects is None:
                     raise ValueError("自由模式矩形定义错误")
                 total_pieces = len(rects)
-            update_progress = self.create_progress_dialog(total_pieces)
-            self.master.update_idletasks()
+    
+            # 创建进度窗口（稍后由后台线程更新）
+            self.progress_win = tk.Toplevel(self.master)
+            self.progress_win.title("切割进度")
+            self.progress_win.transient(self.master)
+            self.progress_win.grab_set()
+            self.progress_win.geometry("300x100")
+            self.progress_win.update_idletasks()
+            w = self.progress_win.winfo_width()
+            h = self.progress_win.winfo_height()
+            x = (self.progress_win.winfo_screenwidth() - w) // 2
+            y = (self.progress_win.winfo_screenheight() - h) // 2
+            self.progress_win.geometry(f"+{x}+{y}")
+            tk.Label(self.progress_win, text=f"正在切割，共 {total_pieces} 张...").pack(pady=5)
+            self.progress_var = tk.IntVar(value=0)
+            self.progress_bar = ttk.Progressbar(self.progress_win, variable=self.progress_var, maximum=total_pieces, length=250)
+            self.progress_bar.pack(pady=5)
+            self.progress_label = tk.Label(self.progress_win, text="0 / {}".format(total_pieces))
+            self.progress_label.pack(pady=5)
+    
+            # 禁用开始按钮，防止重复启动
+            for btn in self.master.winfo_children():
+                if isinstance(btn, tk.Button) and btn.cget("text") in ("开始切割", "批量"):
+                    btn.config(state=tk.DISABLED)
+    
+            # 启动后台线程
+            self.cancel_cut = False
+            threading.Thread(target=self._cut_worker, args=(
+                image, mode, out_dir, ext, save_params, total_pieces
+            ), daemon=True).start()
+    
+        except Exception as e:
+            messagebox.showerror("错误", f"准备切割时出错: {e}")
+            if hasattr(self, 'progress_win') and self.progress_win.winfo_exists():
+                self.progress_win.destroy()
+
+    def _cut_worker(self, image, mode, out_dir, ext, save_params, total_pieces):
+        try:
+            # 进度回调（线程安全）
+            def progress_callback(current):
+                self.master.after(0, self._update_progress, current)
+    
             if mode == "grid":
                 rows = int(self.rows_entry.get())
                 cols = int(self.cols_entry.get())
-                cut_grid(image, rows, cols, out_dir, ext, save_params, update_progress)
+                cut_grid(image, rows, cols, out_dir, ext, save_params, progress_callback)
                 msg = f"标准网格切割完成！共生成 {rows*cols} 张小图"
             elif mode == "smart":
                 blocks, ratios = parse_smart_pattern(self.digit_entry.get().strip())
-                cut_smart(image, blocks, ratios, self.direction.get(), out_dir, ext, save_params, update_progress)
+                cut_smart(image, blocks, ratios, self.direction.get(), out_dir, ext, save_params, progress_callback)
                 msg = f"智能数字模式切割完成！共生成 {sum(blocks)} 张小图"
             elif mode == "advanced":
                 group_ratios, pattern = parse_advanced_pattern(self.advanced_text.get("1.0", tk.END).strip())
-                cut_advanced(image, pattern, group_ratios, self.direction.get(), out_dir, ext, save_params, update_progress)
+                cut_advanced(image, pattern, group_ratios, self.direction.get(), out_dir, ext, save_params, progress_callback)
                 total = 0
                 for blk, ratios in pattern:
                     if ratios is None:
@@ -1553,16 +1648,36 @@ class App:
                 msg = f"高级嵌套模式切割完成！共生成 {total} 张小图"
             else:
                 rects = self.free_rects
-                cut_free(image, rects, out_dir, ext, save_params, update_progress)
+                cut_free(image, rects, out_dir, ext, save_params, progress_callback)
                 msg = f"自由模式切割完成！共生成 {len(rects)} 张小图"
-            if hasattr(self, 'progress_win') and self.progress_win.winfo_exists():
-                self.progress_win.destroy()
-                self.progress_win = None
-            messagebox.showinfo("完成", f"{msg}\n格式：{fmt}\n保存在：{out_dir}")
+    
+            self.master.after(0, self._cut_done, True, msg, out_dir)
+    
         except Exception as e:
-            if hasattr(self, 'progress_win') and self.progress_win.winfo_exists():
-                self.progress_win.destroy()
-            messagebox.showerror("错误", f"切割失败: {e}")
+            self.master.after(0, self._cut_done, False, str(e), None)
+
+    def _update_progress(self, current):
+        if hasattr(self, 'progress_win') and self.progress_win.winfo_exists():
+            self.progress_var.set(current)
+            self.progress_label.config(text=f"{current} / {self.progress_var.get('maximum')}")
+            self.progress_win.update_idletasks()
+    
+    def _cut_done(self, success, info, out_dir=None):
+        # 恢复按钮
+        for btn in self.master.winfo_children():
+            if isinstance(btn, tk.Button) and btn.cget("text") in ("开始切割", "批量"):
+                btn.config(state=tk.NORMAL)
+    
+        if hasattr(self, 'progress_win') and self.progress_win.winfo_exists():
+            self.progress_win.destroy()
+            self.progress_win = None
+    
+        if success:
+            messagebox.showinfo("完成", f"{info}\n格式：{self.format_var.get()}\n保存在：{out_dir}")
+        else:
+            messagebox.showerror("错误", f"切割失败: {info}")
+
+
     # 交互绘制方法（自由模式）
     def on_preset_ratio(self, event=None):
         self.ratio_var.set(self.ratio_preset.get())
