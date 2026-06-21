@@ -780,6 +780,7 @@ class App:
         ToolTip(self.batch_btn,
                 "【批量处理模式】\n"
                 "点击按钮展开/收起批量面板，方便批量切割多张图片。\n\n"
+                "新文件按当前选择的切割参数添加到列表中。\n\n"
                 "使用说明：\n"
                 "1. 添加图片：\n"
                 "   - 点击「浏览图片」多选文件；\n"
@@ -1372,27 +1373,42 @@ class App:
             cum_x = [x0]
             for w in col_widths:
                 cum_x.append(cum_x[-1] + w)
+            # 绘制组间红色分割线（列边界）
             for i in range(1, n):
                 self.preview_canvas.create_line(cum_x[i], y0, cum_x[i], y0 + ph, fill="red", width=2, tags="cut_line")
+            # 处理每一列内部的块
             for col_idx, (blk, ratios) in enumerate(pattern):
                 left = cum_x[col_idx]
                 right = cum_x[col_idx + 1]
                 if ratios is None:
+                    # 无比例 → 全部输出，均分高度，绘制蓝色分割线
                     blk_h = ph / blk
                     for b in range(1, blk):
                         line_y = y0 + b * blk_h
-                        self.preview_canvas.create_line(left, line_y, right, line_y, fill="blue", width=2,
-                                                        tags="cut_line")
+                        self.preview_canvas.create_line(left, line_y, right, line_y, fill="blue", width=2, tags="cut_line")
                 else:
+                    # 有比例 → 按比例分割，判断每个块的 flag
                     cum_y = y0
-                    for b, r in enumerate(ratios):
-                        seg_h = ph * (r[0] / 100.0)
-                        next_y = cum_y + seg_h
-                        if b < blk - 1:
-                            self.preview_canvas.create_line(left, next_y, right, next_y, fill="blue", width=2,
-                                                            tags="cut_line")
-                        cum_y = next_y
-        else:
+                    for b, (r, flag) in enumerate(ratios):
+                        seg_h = ph * (r / 100.0)
+                        block_top = cum_y
+                        block_bottom = cum_y + seg_h
+                        if not flag:
+                            # 被标记为不输出 → 红色半透明遮罩
+                            self.preview_canvas.create_rectangle(
+                                left, block_top, right, block_bottom,
+                                fill='red', stipple='gray50', outline='',
+                                tags='cut_line'
+                            )
+                        else:
+                            # 输出块，在内部绘制蓝色分割线（除最后一块）
+                            if b < blk - 1:
+                                self.preview_canvas.create_line(
+                                    left, block_bottom, right, block_bottom,
+                                    fill='blue', width=2, tags='cut_line'
+                                )
+                        cum_y = block_bottom
+        else:  # vertical
             n = len(pattern)
             if group_ratios is None:
                 row_heights = [ph / n] * n
@@ -1401,8 +1417,10 @@ class App:
             cum_y = [y0]
             for h in row_heights:
                 cum_y.append(cum_y[-1] + h)
+            # 绘制组间红色分割线（行边界）
             for i in range(1, n):
                 self.preview_canvas.create_line(x0, cum_y[i], x0 + pw, cum_y[i], fill="red", width=2, tags="cut_line")
+            # 处理每一行内部的块
             for row_idx, (blk, ratios) in enumerate(pattern):
                 top = cum_y[row_idx]
                 bottom = cum_y[row_idx + 1]
@@ -1410,17 +1428,26 @@ class App:
                     blk_w = pw / blk
                     for b in range(1, blk):
                         line_x = x0 + b * blk_w
-                        self.preview_canvas.create_line(line_x, top, line_x, bottom, fill="blue", width=2,
-                                                        tags="cut_line")
+                        self.preview_canvas.create_line(line_x, top, line_x, bottom, fill="blue", width=2, tags="cut_line")
                 else:
                     cum_x = x0
-                    for b, r in enumerate(ratios):
-                        seg_w = pw * (r[0] / 100.0)
-                        next_x = cum_x + seg_w
-                        if b < blk - 1:
-                            self.preview_canvas.create_line(next_x, top, next_x, bottom, fill="blue", width=2,
-                                                            tags="cut_line")
-                        cum_x = next_x
+                    for b, (r, flag) in enumerate(ratios):
+                        seg_w = pw * (r / 100.0)
+                        block_left = cum_x
+                        block_right = cum_x + seg_w
+                        if not flag:
+                            self.preview_canvas.create_rectangle(
+                                block_left, top, block_right, bottom,
+                                fill='red', stipple='gray50', outline='',
+                                tags='cut_line'
+                            )
+                        else:
+                            if b < blk - 1:
+                                self.preview_canvas.create_line(
+                                    block_right, top, block_right, bottom,
+                                    fill='blue', width=2, tags='cut_line'
+                                )
+                        cum_x = block_right
 
     def draw_free_lines_sub(self):
         if not self.original_img or not self.preview_canvas:
@@ -1699,26 +1726,34 @@ class App:
                 self.progress_win.destroy()
 
     def _cut_worker(self, image, mode, out_dir, ext, save_params, total_pieces):
+        # ================== 新增：生成唯一文件前缀 ==================
+        from datetime import datetime
+        base_name = os.path.splitext(os.path.basename(self.entry1.get().strip()))[0]
+        mode_letter = {"grid": "G", "smart": "S", "advanced": "A", "free": "F"}[mode]
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S_%f")  # 含微秒，确保唯一
+        file_prefix = f"{base_name}_{mode_letter}_{timestamp}"
+        # ==========================================================
+    
         try:
             def progress_callback(current):
                 self.master.after(0, self._update_progress, current)
-
+    
             stop_check = lambda: self.cancel_flag
-
+    
             if mode == "grid":
                 rows = int(self.rows_entry.get())
                 cols = int(self.cols_entry.get())
-                cut_grid(image, rows, cols, out_dir, ext, save_params, progress_callback, "", stop_check)
+                cut_grid(image, rows, cols, out_dir, ext, save_params, progress_callback, file_prefix, stop_check)  # 传入前缀
                 msg = f"标准网格切割完成！共生成 {rows * cols} 张小图"
             elif mode == "smart":
                 blocks, ratios = parse_smart_pattern(self.digit_entry.get().strip())
                 cut_smart(image, blocks, ratios, self.direction.get(), out_dir, ext, save_params,
-                          progress_callback, "", stop_check)
+                          progress_callback, file_prefix, stop_check)
                 msg = f"智能数字模式切割完成！共生成 {sum(blocks)} 张小图"
             elif mode == "advanced":
                 group_ratios, pattern = parse_advanced_pattern(self.advanced_text.get("1.0", tk.END).strip())
                 cut_advanced(image, pattern, group_ratios, self.direction.get(), out_dir, ext, save_params,
-                             progress_callback, "", stop_check)
+                             progress_callback, file_prefix, stop_check)
                 total = 0
                 for blk, ratios in pattern:
                     if ratios is None:
@@ -1728,11 +1763,11 @@ class App:
                 msg = f"高级嵌套模式切割完成！共生成 {total} 张小图"
             else:
                 rects = self.free_rects
-                cut_free(image, rects, out_dir, ext, save_params, progress_callback, "", stop_check)
+                cut_free(image, rects, out_dir, ext, save_params, progress_callback, file_prefix, stop_check)
                 msg = f"自由模式切割完成！共生成 {len(rects)} 张小图"
-
+    
             self.master.after(0, self._cut_done, True, msg, out_dir)
-
+    
         except StopCutting:
             self.master.after(0, self._cut_cancelled)
         except Exception as e:
