@@ -4,7 +4,7 @@
 -- ffmpeg_path=D:\ffmpeg\bin\ffmpeg.exe
 -- log_dir=D:\cut_logs
 -- use_bom=yes
--- prefer_copy=yes   （仅对 c 键有效，Ctrl+Shift+c 只生成命令到日志）
+-- prefer_copy=yes
 
 
 local utils = require 'mp.utils'
@@ -68,7 +68,7 @@ local function toggle_marking_mode()
         segments = {}
         current_segment_start = nil
         update_chapter_marks()
-        mp.osd_message("已进入标记模式！\n→ n : 标记起止\n→ c : 无损切割\n→ Ctrl+Shiftc : 生成精确命令到日志\n→ Esc : 退出", 5)
+        mp.osd_message("已进入标记模式！\n→ n : 标记起止\n→ c : 无损切割 + 输出精确命令\n→ Esc : 退出", 5)
     else
         marking_mode = false
         segments = {}
@@ -100,16 +100,18 @@ local function mark_current_time()
 end
 
 -- ====================== 构建命令字符串（智能引号） ======================
-    local function need_quote(arg)
-        return arg:match("[ \t]") or arg:match('"') or arg == ""
+local function need_quote(arg)
+    return arg:match("[ \t]") or arg:match('"') or arg == ""
+end
+
+local function quote_arg(arg)
+    if need_quote(arg) then
+        return '"' .. arg:gsub('"', '""') .. '"'
+    else
+        return arg
     end
-    local function quote_arg(arg)
-        if need_quote(arg) then
-            return '"' .. arg:gsub('"', '""') .. '"'
-        else
-            return arg
-        end
-    end
+end
+
 local function build_ffmpeg_command(ffmpeg_path, args)
     local parts = { quote_arg(ffmpeg_path) }
     for _, a in ipairs(args) do
@@ -119,7 +121,7 @@ local function build_ffmpeg_command(ffmpeg_path, args)
 end
 
 -- ====================== 通用切割函数 ======================
-local function run_cut(precise)
+local function run_cut()
     if not marking_mode or #segments == 0 then
         mp.osd_message("没有标记片段", 3)
         return
@@ -174,54 +176,10 @@ local function run_cut(precise)
         log_file = utils.join_path(dir, "cutlog.txt")
     end
 
-    -- ========== 精确模式：只生成命令到日志，不执行 ==========
-    if precise then
-        -- 使用 iw:ih 保持原始分辨率，用户可手动修改
-        local scale_str = "scale=iw:ih,format=yuv420p"
-
-        write_cut_log("=====================================", log_file)
-        write_cut_log("精确命令生成时间: " .. os.date("%Y-%m-%d %H:%M:%S"), log_file)
-        write_cut_log("源文件: " .. path, log_file)
-        write_cut_log("-------------------------------------", log_file)
-
-        for i, seg in ipairs(valid) do
-            local duration = seg.end_ - seg.start
-            local s_str = string.format("%.2f", seg.start):gsub("%.", "-")
-            local e_str = string.format("%.2f", seg.end_):gsub("%.", "-")
-            local out = utils.join_path(dir, string.format("%s_cut_seg%d_%s-%s%s", base, i, s_str, e_str, out_ext))
-
-            local args = {
-                "-accurate_seek",
-                "-i", path,
-                "-ss", string.format("%.3f", seg.start),
-                "-t", string.format("%.3f", duration),
-                "-vf", scale_str,
-                "-c:v", "libx265",
-                "-preset", "medium",
-                "-crf", "28",
-                "-c:a", "aac",
-                "-b:a", "128k",
-                "-ar", "44100",
-                "-map_metadata", "0",
-                "-movflags", "+faststart",
-                "-ignore_unknown",
-                "-avoid_negative_ts", "make_zero",
-                "-y", out
-            }
-            local cmd = build_ffmpeg_command(ffmpeg, args)
-            write_cut_log("[精确命令 " .. i .. "] " .. cmd, log_file)
-        end
-
-        write_cut_log("-------------------------------------\n", log_file)
-        mp.osd_message(string.format("✅ 精确命令已写入日志文件\n共 %d 个片段，日志: %s", #valid, log_file), 5)
-        return   -- 不执行切割，不清理状态
-    end
-
-    -- ========== 无损模式（执行实际切割） ==========
     write_cut_log("=====================================", log_file)
     write_cut_log("切割时间: " .. os.date("%Y-%m-%d %H:%M:%S"), log_file)
     write_cut_log("源文件: " .. path, log_file)
-    write_cut_log("模式: 无损优先", log_file)
+    write_cut_log("模式: 无损切割 + 精确命令参考", log_file)
     write_cut_log("-------------------------------------", log_file)
 
     -- 测试 ffmpeg
@@ -234,7 +192,7 @@ local function run_cut(precise)
         return
     end
 
-    -- 逐个处理
+    -- 逐个处理片段
     for i, seg in ipairs(valid) do
         local duration = seg.end_ - seg.start
         local s_str = string.format("%.2f", seg.start):gsub("%.", "-")
@@ -243,10 +201,33 @@ local function run_cut(precise)
 
         mp.osd_message(string.format("正在处理片段 %d/%d ...", i, #valid), 2)
 
+        -- ========== 1. 生成精确转码命令（始终写入日志） ==========
+        local scale_str = "scale=iw:ih,format=yuv420p"
+        local precise_args = {
+            "-accurate_seek",
+            "-i", path,
+            "-ss", string.format("%.3f", seg.start),
+            "-t", string.format("%.3f", duration),
+            "-vf", scale_str,
+            "-c:v", "libx265",
+            "-preset", "medium",
+            "-crf", "28",
+            "-c:a", "aac",
+            "-b:a", "128k",
+            "-ar", "44100",
+            "-map_metadata", "0",
+            "-movflags", "+faststart",
+            "-ignore_unknown",
+            "-avoid_negative_ts", "make_zero",
+            "-y", out
+        }
+        local precise_cmd = build_ffmpeg_command(ffmpeg, precise_args)
+        write_cut_log("[精确命令参考 " .. i .. "] " .. precise_cmd, log_file)
+
+        -- ========== 2. 执行无损切割 ==========
         local cmd_args = nil
         local success = false
 
-        -- 尝试无损复制
         if o.prefer_copy then
             local copy_args = {
                 ffmpeg,
@@ -260,19 +241,24 @@ local function run_cut(precise)
                 "-avoid_negative_ts", "make_zero",
                 "-y", out
             }
+            local copy_cmd = build_ffmpeg_command(ffmpeg, { "-ss", string.format("%.3f", seg.start), "-i", path, "-t", string.format("%.3f", duration), "-c", "copy", "-map_metadata", "0", "-movflags", "+faststart", "-ignore_unknown", "-avoid_negative_ts", "make_zero", "-y", out })
+
+
             local res = utils.subprocess({ args = copy_args, cancellable = false, playback_only = false })
             if res.status == 0 then
                 success = true
                 cmd_args = copy_args
                 mp.osd_message(string.format("片段 %d 无损完成", i), 2)
+                local exec_cmd = build_ffmpeg_command(ffmpeg, { "-ss", string.format("%.3f", seg.start), "-i", path, "-t", string.format("%.3f", duration), "-c", "copy", "-map_metadata", "0", "-movflags", "+faststart", "-ignore_unknown", "-avoid_negative_ts", "make_zero", "-y", out })
+                write_cut_log("[执行成功(无损)] " .. exec_cmd, log_file)
             else
                 local err = res.stderr or "无错误输出"
                 mp.msg.warn("片段 %d 无损复制失败，尝试转码... stderr: %s", i, err:sub(1, 200))
-                write_cut_log(string.format("片段 %d 无损失败，尝试转码: %s", i, err:gsub("\n", " ")), log_file)
+
             end
         end
 
-        -- 失败则转码
+        -- 如果无损失败（或未启用），则转码
         if not success then
             local transcode_args = {
                 ffmpeg,
@@ -292,54 +278,45 @@ local function run_cut(precise)
                 local x264 = { "-c:v", "libx264", "-preset", "veryfast", "-crf", "18", "-c:a", "aac", "-b:a", "128k" }
                 for _, v in ipairs(x264) do table.insert(transcode_args, v) end
             end
-
-           -- 更准确：提取参数
+            -- 记录转码尝试命令
             local args_for_cmd = {}
             for j = 2, #transcode_args do
                 table.insert(args_for_cmd, transcode_args[j])
             end
-            local cmd_str = build_ffmpeg_command(ffmpeg, args_for_cmd)
-            write_cut_log("[尝试转码] " .. cmd_str, log_file)
+            local trans_cmd = build_ffmpeg_command(ffmpeg, args_for_cmd)
+
+
             local res = utils.subprocess({ args = transcode_args, cancellable = false, playback_only = false })
             if res.status == 0 then
                 success = true
                 cmd_args = transcode_args
                 mp.osd_message(string.format("片段 %d 转码完成", i), 2)
+                local exec_cmd = build_ffmpeg_command(ffmpeg, args_for_cmd)
+                write_cut_log("[执行成功(转码)] " .. exec_cmd, log_file)
             else
                 local err = res.stderr or "无错误输出"
                 mp.msg.error("片段 %d 转码失败，stderr: %s", i, err:sub(1, 200))
-                write_cut_log(string.format("片段 %d 转码失败: %s", i, err:gsub("\n", " ")), log_file)
-            end
-        end
 
-        if success and cmd_args then
-            -- 记录成功执行的命令
-            local ffmpeg_path = cmd_args[1]
-            local args = {}
-            for j = 2, #cmd_args do
-                table.insert(args, cmd_args[j])
             end
-            local cmd_str = build_ffmpeg_command(ffmpeg_path, args)
-            write_cut_log("[执行成功] " .. cmd_str, log_file)
         end
     end
 
     write_cut_log("-------------------------------------\n", log_file)
 
-    -- 清理状态
-    current_segment_start = nil
-    marking_mode = false
-    update_chapter_marks()
+    -- 不清理状态，用户按 Esc 手动退出
+    -- current_segment_start = nil
+    -- marking_mode = false
+    -- update_chapter_marks()
 
     mp.osd_message(string.format("✅ 全部完成！共 %d 个片段\n日志: %s", #valid, log_file or "无"), 6)
+    mp.osd_message("标记状态已保留，可按 Esc 退出标记模式", 3)
 end
-
 
 -- ====================== 快捷键绑定 ======================
 mp.add_key_binding("Ctrl+m", "toggle_marking_mode", toggle_marking_mode)
 mp.add_key_binding("n", "mark_current_time", mark_current_time)
-mp.add_key_binding("c", "confirm_marks", function() run_cut(false) end)
-mp.add_key_binding("Ctrl+shift+c", "confirm_marks_precise", function() run_cut(true) end, "force")
+mp.add_key_binding("c", "confirm_marks", run_cut)  -- 执行无损切割 + 输出精确命令
+
 mp.add_key_binding("Esc", "exit_marking_mode", function()
     if marking_mode then toggle_marking_mode() end
 end)
