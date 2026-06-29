@@ -100,7 +100,6 @@ local function mark_current_time()
 end
 
 -- ====================== 构建命令字符串（智能引号） ======================
-local function build_ffmpeg_command(ffmpeg_path, args)
     local function need_quote(arg)
         return arg:match("[ \t]") or arg:match('"') or arg == ""
     end
@@ -111,6 +110,7 @@ local function build_ffmpeg_command(ffmpeg_path, args)
             return arg
         end
     end
+local function build_ffmpeg_command(ffmpeg_path, args)
     local parts = { quote_arg(ffmpeg_path) }
     for _, a in ipairs(args) do
         table.insert(parts, quote_arg(a))
@@ -225,8 +225,7 @@ local function run_cut(precise)
     write_cut_log("-------------------------------------", log_file)
 
     -- 测试 ffmpeg
-    local test_args = { "cmd", "/c", ffmpeg, "-version" }
-    local test_res = utils.subprocess({ args = test_args, cancellable = false, playback_only = false })
+    local test_res = utils.subprocess({ args = { ffmpeg, "-version" }, cancellable = false, playback_only = false })
     if test_res.status ~= 0 then
         local err_msg = "FFmpeg 不可用，请检查路径： " .. ffmpeg
         mp.osd_message(err_msg, 5)
@@ -250,7 +249,7 @@ local function run_cut(precise)
         -- 尝试无损复制
         if o.prefer_copy then
             local copy_args = {
-                "cmd", "/c", ffmpeg,
+                ffmpeg,
                 "-ss", string.format("%.3f", seg.start),
                 "-i", path,
                 "-t", string.format("%.3f", duration),
@@ -276,7 +275,7 @@ local function run_cut(precise)
         -- 失败则转码
         if not success then
             local transcode_args = {
-                "cmd", "/c", ffmpeg,
+                ffmpeg,
                 "-ss", string.format("%.3f", seg.start),
                 "-i", path,
                 "-t", string.format("%.3f", duration),
@@ -293,6 +292,14 @@ local function run_cut(precise)
                 local x264 = { "-c:v", "libx264", "-preset", "veryfast", "-crf", "18", "-c:a", "aac", "-b:a", "128k" }
                 for _, v in ipairs(x264) do table.insert(transcode_args, v) end
             end
+
+           -- 更准确：提取参数
+            local args_for_cmd = {}
+            for j = 2, #transcode_args do
+                table.insert(args_for_cmd, transcode_args[j])
+            end
+            local cmd_str = build_ffmpeg_command(ffmpeg, args_for_cmd)
+            write_cut_log("[尝试转码] " .. cmd_str, log_file)
             local res = utils.subprocess({ args = transcode_args, cancellable = false, playback_only = false })
             if res.status == 0 then
                 success = true
@@ -306,20 +313,14 @@ local function run_cut(precise)
         end
 
         if success and cmd_args then
-            -- 记录实际执行的命令（跳过 cmd /c）
-            local function build_log_cmd(args)
-                local parts = {}
-                for j = 3, #args do
-                    local arg = tostring(args[j])
-                    if arg:find("[ \t]") or arg:find('"') then
-                        arg = '"' .. arg:gsub('"', '\\"') .. '"'
-                    end
-                    table.insert(parts, arg)
-                end
-                return table.concat(parts, " ")
+            -- 记录成功执行的命令
+            local ffmpeg_path = cmd_args[1]
+            local args = {}
+            for j = 2, #cmd_args do
+                table.insert(args, cmd_args[j])
             end
-            local cmd_str = build_log_cmd(cmd_args)
-            write_cut_log("[执行命令] " .. cmd_str, log_file)
+            local cmd_str = build_ffmpeg_command(ffmpeg_path, args)
+            write_cut_log("[执行成功] " .. cmd_str, log_file)
         end
     end
 
@@ -332,6 +333,7 @@ local function run_cut(precise)
 
     mp.osd_message(string.format("✅ 全部完成！共 %d 个片段\n日志: %s", #valid, log_file or "无"), 6)
 end
+
 
 -- ====================== 快捷键绑定 ======================
 mp.add_key_binding("Ctrl+m", "toggle_marking_mode", toggle_marking_mode)
