@@ -84,6 +84,27 @@ FORMAT_CONFIG = {
     }
 }
 
+def center_window(parent, child):
+    """
+    将子窗口（Toplevel）居中显示在父窗口（任意 widget）之上。
+    自动处理屏幕边界，避免超出可视区域。
+    """
+    parent = parent.winfo_toplevel()   # 获取顶层窗口（Tk 或 Toplevel）
+    parent.update_idletasks()          # 确保尺寸/位置最新
+    child.update_idletasks()
+    
+    screen_w = parent.winfo_screenwidth()
+    screen_h = parent.winfo_screenheight()
+    
+    x = parent.winfo_x() + (parent.winfo_width() - child.winfo_width()) // 2
+    y = parent.winfo_y() + (parent.winfo_height() - child.winfo_height()) // 2
+    
+    # 限制不能超出屏幕
+    x = max(0, min(x, screen_w - child.winfo_width()))
+    y = max(0, min(y, screen_h - child.winfo_height()))
+    
+    child.geometry(f"+{x}+{y}")
+
 
 def send_to_trash(path):
     """跨平台地将文件或文件夹移动到回收站/废纸篓。"""
@@ -208,6 +229,7 @@ class TemplateEditor(ttk.Frame):
         self.visual_crop_callback = None
         self._create_widgets()
         self._setup_traces()
+        self._ico_sizes = [(16,16), (32,32), (48,48), (64,64), (128,128), (256,256)]
         self._init_enhance_state()
         if self.default_expanded:
             self._toggle_enhance()
@@ -223,14 +245,25 @@ class TemplateEditor(ttk.Frame):
                                     state="readonly", width=10)
         format_combo.pack(side=tk.LEFT, padx=2)
 
-        ttk.Label(row1, text="质量:").pack(side=tk.LEFT, padx=(10,2))
-        self.quality_var = tk.IntVar(value=85)
-        quality_scale = ttk.Scale(row1, from_=1, to=100, variable=self.quality_var,
-                                  orient=tk.HORIZONTAL, length=80)
-        quality_scale.pack(side=tk.LEFT, padx=2)
-        self.quality_spin = ttk.Spinbox(row1, from_=1, to=100, textvariable=self.quality_var,
+        # ----- 原质量控件代码替换为以下内容 -----
+        self.quality_frame = ttk.Frame(row1)
+        self.quality_frame.pack(side=tk.LEFT, padx=2)   # 放在 row1 中
+        
+        self.quality_label = ttk.Label(self.quality_frame, text="质量:")
+        self.quality_label.pack(side=tk.LEFT, padx=(10,2))
+        
+        self.quality_var = tk.IntVar(value=85)   # 原有，无需改动
+        self.quality_scale = ttk.Scale(self.quality_frame, from_=1, to=100, variable=self.quality_var,
+                                       orient=tk.HORIZONTAL, length=80)
+        self.quality_scale.pack(side=tk.LEFT, padx=2)
+        
+        self.quality_spin = ttk.Spinbox(self.quality_frame, from_=1, to=100, textvariable=self.quality_var,
                                         width=5, state='normal')
         self.quality_spin.pack(side=tk.LEFT, padx=2)
+        
+        # ICO 尺寸按钮（默认隐藏）
+        self.ico_size_btn = ttk.Button(self.quality_frame, text="设置 ICO 尺寸", command=self._edit_ico_sizes)
+        self.ico_size_btn.pack_forget()   # 初始不显示
 
         ttk.Label(row1, text="旋转:").pack(side=tk.LEFT, padx=(10,2))
         self.rotation_var = tk.StringVar(value="0°")
@@ -265,11 +298,25 @@ class TemplateEditor(ttk.Frame):
 
         if self.include_exif_date_delete:
             self.keep_exif_var = tk.BooleanVar(value=False)
-            ttk.Checkbutton(row2, text="保留EXIF", variable=self.keep_exif_var).pack(side=tk.LEFT, padx=(20, 5))
+            self.keep_exif_checkbtn = ttk.Checkbutton(row2, text="保留EXIF", variable=self.keep_exif_var)
+            self.keep_exif_checkbtn.pack(side=tk.LEFT, padx=(20, 5))
+            ToolTip(self.keep_exif_checkbtn,
+                    text="保留EXIF元数据，仅对 JPEG、WebP 等格式有效。\n\n（PNG、BMP、ICO 不支持）",
+                    wraplength=400)
+
             self.preserve_date_var = tk.BooleanVar(value=False)
-            ttk.Checkbutton(row2, text="维持原始日期", variable=self.preserve_date_var).pack(side=tk.LEFT, padx=5)
+            self.preserve_date_checkbtn = ttk.Checkbutton(row2, text="维持原始日期", variable=self.preserve_date_var)
+            self.preserve_date_checkbtn.pack(side=tk.LEFT, padx=5)
+            ToolTip(self.preserve_date_checkbtn,
+                    text="保持输出文件的创建时间和修改时间与原文件一致。",
+                    wraplength=400)
+            
             self.delete_original_var = tk.BooleanVar(value=False)
-            ttk.Checkbutton(row2, text="删除原文件", variable=self.delete_original_var).pack(side=tk.LEFT, padx=5)
+            self.delete_original_checkbtn = ttk.Checkbutton(row2, text="删除原文件", variable=self.delete_original_var)
+            self.delete_original_checkbtn.pack(side=tk.LEFT, padx=5)
+            ToolTip(self.delete_original_checkbtn,
+                    text="转换后原文件将被移至回收站/废纸篓！\n\n请确保输出目录与源文件不同，避免覆盖。",
+                    wraplength=450)
 
         # 第三行：裁剪
         row3 = ttk.Frame(self)
@@ -452,6 +499,101 @@ class TemplateEditor(ttk.Frame):
         self.color_preview = tk.Canvas(wm_row2, width=20, height=20, bg="#FFFFFF", bd=1, relief=tk.SUNKEN)
         self.color_preview.pack(side=tk.LEFT, padx=2)
 
+
+        self.format_var.trace_add('write', self._on_format_changed)
+
+
+    def _on_format_changed(self, *args):
+        fmt = self.format_var.get()
+        if fmt == "ICO":
+            # 隐藏质量控件
+            self.quality_label.pack_forget()
+            self.quality_scale.pack_forget()
+            self.quality_spin.pack_forget()
+            # 显示按钮（按钮在质量控件之后，所以 pack 会排在最后，但因为我们隐藏了前面的，按钮会占据整个容器位置，顺序正确）
+            self.ico_size_btn.pack(side=tk.LEFT, padx=2)
+        else:
+            # 隐藏按钮
+            self.ico_size_btn.pack_forget()
+            # 按原顺序重新显示质量控件
+            self.quality_label.pack(side=tk.LEFT, padx=(10,2))
+            self.quality_scale.pack(side=tk.LEFT, padx=2)
+            self.quality_spin.pack(side=tk.LEFT, padx=2)
+        self._on_settings_changed()
+
+    def _edit_ico_sizes(self):
+        """弹出独立对话框编辑 ICO 尺寸列表"""
+        dlg = Toplevel(self)
+        dlg.title("编辑 ICO 尺寸")
+        dlg.transient(self)
+        dlg.grab_set()
+        dlg.geometry("300x250")
+        center_window(self, dlg)   # 居中
+    
+        # 当前尺寸列表副本
+        current_sizes = self._ico_sizes.copy()
+    
+        # Listbox 显示尺寸
+        list_frame = ttk.Frame(dlg)
+        list_frame.pack(fill=tk.BOTH, expand=True, padx=10, pady=10)
+        listbox = tk.Listbox(list_frame, selectmode=tk.EXTENDED, height=8)
+        scroll = ttk.Scrollbar(list_frame, orient=tk.VERTICAL, command=listbox.yview)
+        listbox.configure(yscrollcommand=scroll.set)
+        listbox.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        scroll.pack(side=tk.RIGHT, fill=tk.Y)
+    
+        def refresh_list():
+            listbox.delete(0, tk.END)
+            for w, h in current_sizes:
+                listbox.insert(tk.END, f"{w}x{h}")
+    
+        refresh_list()
+    
+        # 按钮区域
+        btn_frame = ttk.Frame(dlg)
+        btn_frame.pack(fill=tk.X, padx=10, pady=5)
+    
+        def add_size():
+            from tkinter import simpledialog
+            s = simpledialog.askstring("添加尺寸", "输入宽x高，如 16x16", parent=dlg)
+            if not s:
+                return
+            try:
+                w, h = map(int, s.split('x'))
+                if w <= 0 or h <= 0:
+                    raise ValueError
+                current_sizes.append((w, h))
+                refresh_list()
+            except:
+                messagebox.showerror("错误", "无效格式，请输入 宽x高")
+    
+        def remove_selected():
+            selected = listbox.curselection()
+            if not selected:
+                messagebox.showinfo("提示", "请先选择要删除的尺寸")
+                return
+            for idx in reversed(selected):
+                del current_sizes[idx]
+            refresh_list()
+    
+        def restore_default():
+            default = [(16,16), (32,32), (48,48), (64,64), (128,128), (256,256)]
+            current_sizes.clear()
+            current_sizes.extend(default)
+            refresh_list()
+    
+        def save_and_close():
+            self._ico_sizes = current_sizes.copy()
+            self._on_settings_changed()
+            dlg.destroy()
+    
+        ttk.Button(btn_frame, text="添加", command=add_size, width=8).pack(side=tk.LEFT, padx=2)
+        ttk.Button(btn_frame, text="删除", command=remove_selected, width=8).pack(side=tk.LEFT, padx=2)
+        ttk.Button(btn_frame, text="复原默认", command=restore_default, width=10).pack(side=tk.LEFT, padx=2)
+        ttk.Button(btn_frame, text="保存", command=save_and_close, width=8).pack(side=tk.RIGHT, padx=2)
+        ttk.Button(btn_frame, text="取消", command=dlg.destroy, width=8).pack(side=tk.RIGHT, padx=2)
+
+
     def choose_color(self):
         from tkinter import colorchooser
         initial = self.watermark_color_var.get()
@@ -524,6 +666,7 @@ class TemplateEditor(ttk.Frame):
         self.color_enable.trace_add('write', lambda *a: self._update_enhance_enable())
         self.saturation_enable.trace_add('write', lambda *a: self._update_enhance_enable())
         self.sharpen_enable.trace_add('write', lambda *a: self._update_enhance_enable())
+        
 
     def _init_enhance_state(self):
         self._update_enhance_enable()
@@ -603,6 +746,7 @@ class TemplateEditor(ttk.Frame):
             'watermark_position': self.watermark_pos_var.get(),
             'watermark_opacity': self.watermark_opacity_var.get(),
             'preview_size': self.preview_size_var.get(),
+            'ico_sizes': self._ico_sizes.copy(),
         }
         # 保存颜色：将颜色名称转换为十六进制存储
         settings['watermark_color'] = self.watermark_color_var.get()
@@ -663,6 +807,13 @@ class TemplateEditor(ttk.Frame):
             self.keep_exif_var.set(settings.get('keep_exif', False))
             self.preserve_date_var.set(settings.get('preserve_original_date', False))
             self.delete_original_var.set(settings.get('delete_original', False))
+
+
+        ico_sizes = settings.get('ico_sizes')
+        if ico_sizes and isinstance(ico_sizes, list):
+            self._ico_sizes = [tuple(s) for s in ico_sizes if isinstance(s, (tuple, list)) and len(s)==2]
+        # 确保格式变化触发显示切换（在 set_settings 最后调用 _on_format_changed）
+        self._on_format_changed()  # 强制更新显示状态
         
         self._on_resize_mode_changed()
         self._update_enhance_enable()
@@ -713,6 +864,7 @@ class ImageConverter(TkinterDnD.Tk):
         self.font_path_cache = {}
         self.visual_crop_callback = None   # 外部设置的回调函数
         self.current_preview_task = None   # 当前显示的预览任务
+        self.active_crop_editor = None
 
         self.initial_files = []
         if len(sys.argv) > 1:
@@ -931,14 +1083,14 @@ class ImageConverter(TkinterDnD.Tk):
         scale_y = base_h / display_h if display_h > 0 else 1
     
         # ========== 3. 交互绘制（与之前相同，但坐标转换有偏移） ==========
-        old_cursor = canvas.cget("cursor")
-        canvas.config(cursor="crosshair")
+     #   old_cursor = canvas.cget("cursor")
+    #    canvas.config(cursor="crosshair")
     
         canvas.delete("crop_hint")
         hint_text = canvas.create_text(
             canvas.winfo_width()//2, canvas.winfo_height()//2 - 30,
-            text="🖱 拖拽绘制裁剪区域\nShift: 保持正方形",
-            font=("Arial", 16, "bold"), fill="black", tags="crop_hint"
+            text="🖱 拖拽绘制裁剪区域\nShift: 保持正方形\n取消勾选可重置预览",
+            font=("", 14, "bold"), fill="black", tags="crop_hint"
         )
         hint_bbox = canvas.bbox(hint_text)
         if hint_bbox:
@@ -1051,7 +1203,7 @@ class ImageConverter(TkinterDnD.Tk):
                 self.rect_id = None
             self.start_x = self.start_y = None
             canvas.delete("crop_hint")
-            canvas.config(cursor=old_cursor)
+        #    canvas.config(cursor=old_cursor)
     
         canvas.bind("<ButtonPress-1>", on_mouse_down)
         canvas.bind("<B1-Motion>", on_mouse_move)
@@ -1641,10 +1793,7 @@ class ImageConverter(TkinterDnD.Tk):
         dlg.transient(self)
         dlg.grab_set()
         dlg.geometry("500x200")
-        dlg.update_idletasks()
-        x = self.winfo_x() + (self.winfo_width() - dlg.winfo_width()) // 2
-        y = self.winfo_y() + (self.winfo_height() - dlg.winfo_height()) // 2
-        dlg.geometry(f"+{x}+{y}")
+        center_window(self, dlg)
         dlg.deiconify()
         dlg.lift()
         dlg.focus_force()
@@ -2119,15 +2268,8 @@ class ImageConverter(TkinterDnD.Tk):
         dlg.title("编辑任务参数")
         dlg.transient(self)
         dlg.grab_set()
-        dlg.geometry("800x500")  # 初始高度，后续动态调整
-        dlg.update_idletasks()
-        screen_w = self.winfo_screenwidth()
-        screen_h = self.winfo_screenheight()
-        x = self.winfo_x() + (self.winfo_width() - dlg.winfo_width()) // 2
-        y = self.winfo_y() + (self.winfo_height() - dlg.winfo_height()) // 2
-        x = max(0, min(x, screen_w - dlg.winfo_width()))
-        y = max(0, min(y, screen_h - dlg.winfo_height()))
-        dlg.geometry(f"+{x}+{y}")
+        dlg.geometry("800x500")
+        center_window(self, dlg)   # 直接调用
         dlg.deiconify()
         dlg.lift()
         dlg.focus_force()
@@ -2864,6 +3006,12 @@ class ImageConverter(TkinterDnD.Tk):
                     config = FORMAT_CONFIG.get(actual_fmt)
                     if config and config.get('supports_exif', False):
                         save_params['exif'] = exif
+                if fmt == "ICO":
+                    sizes = task.get('ico_sizes')
+                    if not sizes:
+                        # 从模板编辑器获取当前尺寸
+                        sizes = self.template_editor._ico_sizes
+                    save_params['sizes'] = sizes
                 img.save(out_path, actual_fmt, **save_params)
             if preserve_date and src_stat is not None:
                 if platform.system() == 'Windows':
