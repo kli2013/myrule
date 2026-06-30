@@ -1067,18 +1067,20 @@ class App:
         mode = template["mode"]
         fmt = template.get("format", "WEBP")
         quality = template.get("quality", "85")
-
-        # 根据复选框决定输出目录和文件前缀
+    
+        # ---------- 统一生成前缀（有序号+模式标识） ----------
+        mode_flag = {"grid": "G", "smart": "S", "advanced": "A", "free": "F"}.get(mode, "X")
+        prefix = f"{seq_num:03d}_{mode_flag}"   # 例如 "001_G"
+    
+        # ---------- 根据选项决定输出目录 ----------
         if self.output_same_dir.get():
             out_dir = base_out_dir
-            mode_flag = {"grid": "G", "smart": "S", "advanced": "A", "free": "F"}.get(mode, "X")
-            prefix = f"{seq_num:03d}_{mode_flag}"
         else:
             basename = os.path.splitext(os.path.basename(item.filepath))[0]
             out_dir = os.path.join(base_out_dir, basename)
-            prefix = ""
         os.makedirs(out_dir, exist_ok=True)
-
+    
+        # ---------- 保存参数 ----------
         save_params = {"format": fmt}
         if fmt == "JPEG":
             try:
@@ -1101,7 +1103,8 @@ class App:
         ext = fmt.lower()
         if fmt in ("JPEG", "WEBP") and img.mode in ("RGBA", "LA", "P"):
             img = img.convert("RGB")
-
+    
+        # ---------- 执行切割（所有模式均传入 prefix） ----------
         if mode == "grid":
             rows = int(template["rows"])
             cols = int(template["cols"])
