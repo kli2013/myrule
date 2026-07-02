@@ -63,7 +63,7 @@ FORMAT_CONFIG = {
         'save_params': {'quality': 'quality', 'lossless': False},
         'quality_range': (1, 100),
         'default_quality': 80,
-        'mode': 'RGB',
+        'mode': 'None',
         'supports_exif': True,
     },
     'BMP': {
