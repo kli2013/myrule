@@ -32,7 +32,7 @@ FORMAT_CONFIG = {
         'extension': '.png',
         'save_params': {'compress_level': 'compress_level'},
         'quality_range': (0, 9),
-        'default_quality': 6,
+        'default_quality': 4,
         'mode': None,
         'supports_exif': False,
     },
@@ -41,7 +41,7 @@ FORMAT_CONFIG = {
         'save_params': {'quality': 'quality', 'lossless': False},
         'quality_range': (1, 100),
         'default_quality': 80,
-        'mode': None,          # WebP 支持透明
+        'mode': None,
         'supports_exif': True,
     },
     'BMP': {
@@ -793,25 +793,39 @@ class App:
         self.on_free_param_changed()
         self.free_rects = []
 
+
+
+
+
+
         # 输出格式与质量
         format_frame = tk.Frame(master)
         format_frame.grid(row=8, column=0, columnspan=3, sticky="w", padx=5, pady=5)
+        
         tk.Label(format_frame, text="输出格式:").pack(side=tk.LEFT, padx=2)
         self.format_var = tk.StringVar(value="WEBP")
         available_formats = list(FORMAT_CONFIG.keys())
         self.format_combo = ttk.Combobox(format_frame, textvariable=self.format_var,
-                                         values=available_formats,
-                                         state="readonly", width=10)
+                                         values=available_formats, state="readonly", width=10)
         self.format_combo.pack(side=tk.LEFT, padx=5)
         self.format_combo.bind("<<ComboboxSelected>>", self.on_format_change)
-
-        tk.Label(format_frame, text="质量:").pack(side=tk.LEFT, padx=5)
+        
+        # ---- 将质量控件包进一个子框架（便于整体隐藏） ----
+        self.quality_frame = tk.Frame(format_frame)
+        self.quality_frame.pack(side=tk.LEFT, padx=5)
+        self.quality_label = tk.Label(self.quality_frame, text="质量:")
+        self.quality_label.pack(side=tk.LEFT, padx=5)
         self.quality_var = tk.StringVar(value="85")
-        self.quality_entry = tk.Entry(format_frame, textvariable=self.quality_var, width=5)
+        self.quality_entry = tk.Entry(self.quality_frame, textvariable=self.quality_var, width=5)
         self.quality_entry.pack(side=tk.LEFT, padx=2)
-        self.hint_label = tk.Label(format_frame, text="(JPEG:1-100, PNG:0-9)", fg="gray")
+        self.hint_label = tk.Label(self.quality_frame, text="(JPEG:1-100, PNG:0-9)", fg="gray")
         self.hint_label.pack(side=tk.LEFT, padx=10)
-        self.on_format_change()
+        
+        # ---- 新增 ICO 尺寸设置按钮（初始隐藏） ----
+        self.ico_sizes = [(16,16), (32,32), (48,48), (64,64), (128,128), (256,256)]  # ICO尺寸列表
+        self.ico_size_btn = tk.Button(format_frame, text="设置ICO尺寸", command=self.edit_ico_sizes)
+        self.ico_size_btn.pack(side=tk.LEFT, padx=5)
+        self.ico_size_btn.pack_forget()   # 默认隐藏
 
         # 底部按钮（添加批量按钮）
         bottom_frame = tk.Frame(master)
@@ -1152,7 +1166,8 @@ class App:
         for key, val in config.get('save_params', {}).items():
             if key not in ('quality', 'compress_level'):
                 save_params[key] = val
-
+        if fmt == "ICO":
+            save_params['sizes'] = self.ico_sizes
         target_mode = config.get('mode')
         if target_mode and img.mode != target_mode:
             img = img.convert(target_mode)
@@ -1206,6 +1221,7 @@ class App:
         self.refresh_preview()
         self.master.update_idletasks()
         self.master.geometry("")
+        self.ico_sizes = [(16,16), (32,32), (48,48), (64,64), (128,128), (256,256)]
 
     def toggle_preview_window(self):
         if self.preview_window is not None and self.preview_window.winfo_exists():
@@ -1667,19 +1683,106 @@ class App:
         config = FORMAT_CONFIG.get(fmt, {})
         q_range = config.get('quality_range')
         default_q = config.get('default_quality')
+    
+        # ---- 切换显示：ICO 时隐藏质量框，显示尺寸按钮 ----
+        if fmt == "ICO":
+            self.quality_frame.pack_forget()
+            self.ico_size_btn.pack(side=tk.LEFT, padx=5)
+        else:
+            self.ico_size_btn.pack_forget()
+            self.quality_frame.pack(side=tk.LEFT, padx=5)
+    
+        # ----- 根据格式设置标签文本 -----
+        if fmt == "PNG":
+            self.quality_label.config(text="压缩:")
+        else:
+            self.quality_label.config(text="质量:")
+    
+        # ---- 设置质量/压缩默认值（强制重置） ----
         if q_range is not None:
             min_q, max_q = q_range
             self.hint_label.config(text=f"({fmt}: {min_q}-{max_q})")
-            try:
-                cur = int(self.quality_var.get())
-                if cur < min_q:
-                    self.quality_var.set(str(min_q))
-                elif cur > max_q:
-                    self.quality_var.set(str(max_q))
-            except:
-                self.quality_var.set(str(default_q if default_q is not None else min_q))
+            # 强制设为默认值（如果定义了），否则设为最小值
+            if default_q is not None:
+                new_val = default_q
+            else:
+                new_val = min_q
+            self.quality_var.set(str(new_val))
         else:
             self.hint_label.config(text="(此格式忽略质量参数)")
+            pass
+
+    def edit_ico_sizes(self):
+        """弹出对话框编辑 ICO 尺寸列表"""
+        dlg = tk.Toplevel(self.master)
+        dlg.title("编辑 ICO 尺寸")
+        dlg.transient(self.master)
+        dlg.grab_set()
+        dlg.geometry("300x250")
+        # 居中
+        dlg.update_idletasks()
+        x = (dlg.winfo_screenwidth() - 300) // 2
+        y = (dlg.winfo_screenheight() - 250) // 2
+        dlg.geometry(f"+{x}+{y}")
+    
+        current_sizes = self.ico_sizes.copy()
+    
+        list_frame = tk.Frame(dlg)
+        list_frame.pack(fill=tk.BOTH, expand=True, padx=10, pady=10)
+        listbox = tk.Listbox(list_frame, selectmode=tk.EXTENDED, height=8)
+        scroll = tk.Scrollbar(list_frame, orient=tk.VERTICAL, command=listbox.yview)
+        listbox.configure(yscrollcommand=scroll.set)
+        listbox.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        scroll.pack(side=tk.RIGHT, fill=tk.Y)
+    
+        def refresh_list():
+            listbox.delete(0, tk.END)
+            for w, h in current_sizes:
+                listbox.insert(tk.END, f"{w}x{h}")
+    
+        refresh_list()
+    
+        btn_frame = tk.Frame(dlg)
+        btn_frame.pack(fill=tk.X, padx=10, pady=5)
+    
+        def add_size():
+            from tkinter import simpledialog
+            s = simpledialog.askstring("添加尺寸", "输入宽x高，如 16x16", parent=dlg)
+            if not s:
+                return
+            try:
+                w, h = map(int, s.split('x'))
+                if w <= 0 or h <= 0:
+                    raise ValueError
+                current_sizes.append((w, h))
+                refresh_list()
+            except:
+                messagebox.showerror("错误", "无效格式，请输入 宽x高")
+    
+        def remove_selected():
+            selected = listbox.curselection()
+            if not selected:
+                messagebox.showinfo("提示", "请先选择要删除的尺寸")
+                return
+            for idx in reversed(selected):
+                del current_sizes[idx]
+            refresh_list()
+    
+        def restore_default():
+            default = [(16,16), (32,32), (48,48), (64,64), (128,128), (256,256)]
+            current_sizes.clear()
+            current_sizes.extend(default)
+            refresh_list()
+    
+        def save_and_close():
+            self.ico_sizes = current_sizes.copy()
+            dlg.destroy()
+    
+        tk.Button(btn_frame, text="添加", command=add_size, width=8).pack(side=tk.LEFT, padx=2)
+        tk.Button(btn_frame, text="删除", command=remove_selected, width=8).pack(side=tk.LEFT, padx=2)
+        tk.Button(btn_frame, text="复原默认", command=restore_default, width=10).pack(side=tk.LEFT, padx=2)
+        tk.Button(btn_frame, text="保存", command=save_and_close, width=8).pack(side=tk.RIGHT, padx=2)
+        tk.Button(btn_frame, text="取消", command=dlg.destroy, width=8).pack(side=tk.RIGHT, padx=2)
 
 
     def get_save_params(self, fmt):
@@ -1704,6 +1807,8 @@ class App:
                     save_params[key] = param_name
         else:
             save_params.update(config['save_params'])
+        if fmt == "ICO":
+            save_params['sizes'] = self.ico_sizes
         save_params['format'] = fmt
         return save_params
 
