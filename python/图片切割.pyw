@@ -13,12 +13,54 @@ try:
 except ImportError:
     HAS_DND = False
 
-
 # ---------- 自定义异常 ----------
 class StopCutting(Exception):
     """用户取消切割时抛出的异常"""
     pass
 
+# ========== 统一格式配置 ==========
+FORMAT_CONFIG = {
+    'JPEG': {
+        'extension': '.jpg',
+        'save_params': {'quality': 'quality', 'optimize': True},
+        'quality_range': (1, 100),
+        'default_quality': 85,
+        'mode': 'RGB',
+        'supports_exif': True,
+    },
+    'PNG': {
+        'extension': '.png',
+        'save_params': {'compress_level': 'compress_level'},
+        'quality_range': (0, 9),
+        'default_quality': 6,
+        'mode': None,
+        'supports_exif': False,
+    },
+    'WEBP': {
+        'extension': '.webp',
+        'save_params': {'quality': 'quality', 'lossless': False},
+        'quality_range': (1, 100),
+        'default_quality': 80,
+        'mode': None,          # WebP 支持透明
+        'supports_exif': True,
+    },
+    'BMP': {
+        'extension': '.bmp',
+        'save_params': {},
+        'quality_range': None,
+        'default_quality': None,
+        'mode': 'RGB',
+        'supports_exif': False,
+    },
+    'ICO': {
+        'extension': '.ico',
+        'save_params': {'sizes': [(16, 16), (32, 32), (48, 48), (64, 64), (128, 128), (256, 256)]},
+        'quality_range': None,
+        'default_quality': None,
+        'mode': 'RGBA',
+        'supports_exif': False,
+    }
+}
 
 # ---------- 获取所有PIL支持的图片格式 ----------
 def get_supported_extensions():
@@ -26,12 +68,11 @@ def get_supported_extensions():
         exts = list(Image.registered_extensions().keys())
         return tuple(ext.lower() for ext in exts if ext.startswith('.'))
     except Exception:
-        return ('.png', '.jpg', '.jpeg', '.bmp', '.tiff', '.webp', '.gif')
+        return ('.png', '.jpg', '.jpeg', '.bmp', '.tiff', '.webp', '.gif', '.ico')
 
 
 SUPPORTED_IMG_EXT = get_supported_extensions()
 SUPPORTED_IMG_FILTER = " ".join(f"*{ext}" for ext in SUPPORTED_IMG_EXT)
-
 
 def is_image_file(filepath):
     ext = os.path.splitext(filepath)[1].lower()
@@ -571,7 +612,6 @@ class App:
         self.preview_canvas = None
         self.preview_photo = None
 
-        # ----- 左侧控件区域 -----
         tk.Label(master, text="切割的图片:").grid(row=0, column=0, sticky="e", padx=5, pady=5)
         self.entry1 = tk.Entry(master, width=50)
         self.entry1.grid(row=0, column=1, padx=5, pady=5, sticky="ew")
@@ -708,7 +748,7 @@ class App:
         self.advanced_frame.grid(row=6, column=0, columnspan=3, sticky="ew", padx=5, pady=5)
         self.advanced_text = tk.Text(self.advanced_frame, height=6, width=50, font=("Consolas", 10))
         self.advanced_text.pack(fill=tk.BOTH, expand=True, padx=5, pady=5)
-        self.advanced_text.insert("1.0", "2,2,6 | [[1,[100]], [2,[30,70]], [3,[20,30,50]]]")
+        self.advanced_text.insert("1.0", "2,2,6 | [[1,[100]], [2,[d30,70]], [3,[20,30,50]]]")
         self.advanced_text.bind("<KeyRelease>", self.on_advanced_param_changed)
 
         # 自由模式参数区域（增强交互）
@@ -751,7 +791,6 @@ class App:
         self.free_text.insert("1.0", "10,10,200,150\n250,30,180,200;50,200,300,100")
         self.free_text.bind("<KeyRelease>", self.on_free_param_changed)
         self.on_free_param_changed()
-
         self.free_rects = []
 
         # 输出格式与质量
@@ -759,8 +798,9 @@ class App:
         format_frame.grid(row=8, column=0, columnspan=3, sticky="w", padx=5, pady=5)
         tk.Label(format_frame, text="输出格式:").pack(side=tk.LEFT, padx=2)
         self.format_var = tk.StringVar(value="WEBP")
+        available_formats = list(FORMAT_CONFIG.keys())
         self.format_combo = ttk.Combobox(format_frame, textvariable=self.format_var,
-                                         values=["PNG", "JPEG", "BMP", "TIFF", "WEBP"],
+                                         values=available_formats,
                                          state="readonly", width=10)
         self.format_combo.pack(side=tk.LEFT, padx=5)
         self.format_combo.bind("<<ComboboxSelected>>", self.on_format_change)
@@ -771,6 +811,7 @@ class App:
         self.quality_entry.pack(side=tk.LEFT, padx=2)
         self.hint_label = tk.Label(format_frame, text="(JPEG:1-100, PNG:0-9)", fg="gray")
         self.hint_label.pack(side=tk.LEFT, padx=10)
+        self.on_format_change()
 
         # 底部按钮（添加批量按钮）
         bottom_frame = tk.Frame(master)
@@ -795,7 +836,7 @@ class App:
                 wraplength=600)
         self.preview_btn = tk.Button(bottom_frame, text="打开预览窗口", command=self.toggle_preview_window)
         self.preview_btn.pack(side=tk.LEFT, padx=(30, 5))
-        tk.Button(bottom_frame, text="开始切割", command=self.start_cutting).pack(side=tk.LEFT, padx=10)
+        tk.Button(bottom_frame, text="开始切割", command=self.start_cutting, bg="#ABEFFE").pack(side=tk.LEFT, padx=10)
         tk.Button(bottom_frame, text="恢复默认", command=self.reset_parameters).pack(side=tk.LEFT, padx=10)
         tk.Button(bottom_frame, text="退出", command=self.quit_app).pack(side=tk.LEFT, padx=10)
 
@@ -807,10 +848,10 @@ class App:
         batch_btn_frame.pack(fill=tk.X, padx=5, pady=5)
         tk.Button(batch_btn_frame, text="浏览图片", command=self.batch_add_images).pack(side=tk.LEFT, padx=5)
         tk.Button(batch_btn_frame, text="遍历文件夹", command=self.batch_add_folder).pack(side=tk.LEFT, padx=5)
-        tk.Button(batch_btn_frame, text="开始批量切割", command=self.batch_start_cutting).pack(side=tk.LEFT, padx=5)
+        tk.Button(batch_btn_frame, text="开始批量切割", command=self.batch_start_cutting, bg="#ABEFFE").pack(side=tk.LEFT, padx=5)
         tk.Button(batch_btn_frame, text="清空列表", command=self.batch_clear_list).pack(side=tk.LEFT, padx=5)
         tk.Button(batch_btn_frame, text="删除选中", command=self.batch_remove_selected).pack(side=tk.LEFT, padx=5)
-        # 新增：输出同目录复选框
+        # 输出同目录复选框
         self.output_same_dir = tk.BooleanVar(value=False)
         self.same_dir_cb = tk.Checkbutton(batch_btn_frame, text="输出同目录", variable=self.output_same_dir)
         self.same_dir_cb.pack(side=tk.LEFT, padx=5)
@@ -902,6 +943,7 @@ class App:
             template["free_rects"] = self.free_rects.copy()
         return template
 
+
     def add_batch_item(self, filepath):
         if not os.path.isfile(filepath) or not is_image_file(filepath):
             messagebox.showwarning("警告", f"跳过非图片文件：{filepath}")
@@ -924,6 +966,7 @@ class App:
         display = f"{os.path.basename(filepath)} [{mode_name}] {detail}".strip()
         self.batch_listbox.insert(tk.END, display)
 
+
     def add_current_image(self):
         img_path = self.entry1.get().strip()
         if not img_path or not os.path.isfile(img_path):
@@ -942,6 +985,7 @@ class App:
         for p in paths:
             self.add_batch_item(p)
 
+
     def batch_add_folder(self):
         folder = filedialog.askdirectory(title="选择包含图片的文件夹")
         if not folder:
@@ -952,10 +996,12 @@ class App:
                 if is_image_file(full):
                     self.add_batch_item(full)
 
+
     def batch_clear_list(self):
         if messagebox.askyesno("确认", "清空批量列表？"):
             self.batch_items.clear()
             self.batch_listbox.delete(0, tk.END)
+
 
     def batch_remove_selected(self):
         selected = self.batch_listbox.curselection()
@@ -964,6 +1010,7 @@ class App:
         for idx in reversed(selected):
             del self.batch_items[idx]
             self.batch_listbox.delete(idx)
+
 
     def on_drop_to_batch_list(self, event):
         files = self.master.tk.splitlist(event.data)
@@ -976,6 +1023,7 @@ class App:
                         full = os.path.join(root, file)
                         if is_image_file(full):
                             self.add_batch_item(full)
+
 
     def batch_start_cutting(self):
         if not self.batch_items:
@@ -1005,7 +1053,6 @@ class App:
         self.batch_progress_bar.pack(pady=5)
         self.batch_progress_label = tk.Label(self.batch_progress_win, text="0 / {}".format(total))
         self.batch_progress_label.pack(pady=5)
-
         # 取消按钮
         tk.Button(self.batch_progress_win, text="取消", command=self.request_batch_cancel).pack(pady=5)
 
@@ -1016,6 +1063,7 @@ class App:
 
         self.batch_cancel_flag = False
         threading.Thread(target=self._batch_worker, args=(base_out_dir, total), daemon=True).start()
+
 
     def _batch_worker(self, base_out_dir, total):
         success_count = 0
@@ -1035,11 +1083,13 @@ class App:
             self.master.after(0, self._batch_update_progress, idx)
         self.master.after(0, self._batch_done, success_count, total, errors, self.batch_cancel_flag)
 
+
     def _batch_update_progress(self, current):
         if hasattr(self, 'batch_progress_win') and self.batch_progress_win.winfo_exists():
             self.batch_progress_var.set(current)
             self.batch_progress_label.config(text=f"{current} / {self.batch_progress_var.get('maximum')}")
             self.batch_progress_win.update_idletasks()
+
 
     def _batch_done(self, success_count, total, errors, cancelled):
         # 恢复按钮
@@ -1067,11 +1117,16 @@ class App:
         mode = template["mode"]
         fmt = template.get("format", "WEBP")
         quality = template.get("quality", "85")
-    
+
+        config = FORMAT_CONFIG.get(fmt, {})
+        ext = config.get('extension', '.' + fmt.lower()).lstrip('.')
+        if not ext:
+            ext = fmt.lower()
+
         # ---------- 统一生成前缀（有序号+模式标识） ----------
         mode_flag = {"grid": "G", "smart": "S", "advanced": "A", "free": "F"}.get(mode, "X")
-        prefix = f"{seq_num:03d}_{mode_flag}"   # 例如 "001_G"
-    
+        prefix = f"{seq_num:03d}_{mode_flag}"
+
         # ---------- 根据选项决定输出目录 ----------
         if self.output_same_dir.get():
             out_dir = base_out_dir
@@ -1079,31 +1134,29 @@ class App:
             basename = os.path.splitext(os.path.basename(item.filepath))[0]
             out_dir = os.path.join(base_out_dir, basename)
         os.makedirs(out_dir, exist_ok=True)
-    
+
         # ---------- 保存参数 ----------
         save_params = {"format": fmt}
-        if fmt == "JPEG":
+        q_range = config.get('quality_range')
+        if q_range is not None:
+            min_q, max_q = q_range
             try:
-                q = max(1, min(100, int(quality)))
-                save_params["quality"] = q
+                q_val = int(quality)
+                q_val = max(min_q, min(max_q, q_val))
             except:
-                save_params["quality"] = 95
-        elif fmt == "PNG":
-            try:
-                l = max(0, min(9, int(quality)))
-                save_params["compress_level"] = l
-            except:
-                save_params["compress_level"] = 6
-        elif fmt == "WEBP":
-            try:
-                q = max(1, min(100, int(quality)))
-                save_params["quality"] = q
-            except:
-                save_params["quality"] = 80
-        ext = fmt.lower()
-        if fmt in ("JPEG", "WEBP") and img.mode in ("RGBA", "LA", "P"):
-            img = img.convert("RGB")
-    
+                q_val = config.get('default_quality', min_q)
+            if 'quality' in config.get('save_params', {}):
+                save_params['quality'] = q_val
+            elif 'compress_level' in config.get('save_params', {}):
+                save_params['compress_level'] = q_val
+        for key, val in config.get('save_params', {}).items():
+            if key not in ('quality', 'compress_level'):
+                save_params[key] = val
+
+        target_mode = config.get('mode')
+        if target_mode and img.mode != target_mode:
+            img = img.convert(target_mode)
+
         # ---------- 执行切割（所有模式均传入 prefix） ----------
         if mode == "grid":
             rows = int(template["rows"])
@@ -1411,7 +1464,7 @@ class App:
                                     fill='blue', width=2, tags='cut_line'
                                 )
                         cum_y = block_bottom
-        else:  # vertical
+        else:
             n = len(pattern)
             if group_ratios is None:
                 row_heights = [ph / n] * n
@@ -1451,6 +1504,7 @@ class App:
                                     fill='blue', width=2, tags='cut_line'
                                 )
                         cum_x = block_right
+
 
     def draw_free_lines_sub(self):
         if not self.original_img or not self.preview_canvas:
@@ -1505,20 +1559,25 @@ class App:
         self.master.update_idletasks()
         self.master.geometry("")
 
+
     def on_dir_changed(self):
         self.refresh_preview()
+
 
     def on_grid_param_changed(self, event=None):
         if self.cut_mode.get() == "grid":
             self.refresh_preview()
 
+
     def on_smart_param_changed(self, event=None):
         if self.cut_mode.get() == "smart":
             self.refresh_preview()
 
+
     def on_advanced_param_changed(self, event=None):
         if self.cut_mode.get() == "advanced":
             self.refresh_preview()
+
 
     def on_free_param_changed(self, event=None):
         if self.cut_mode.get() == "free":
@@ -1529,11 +1588,13 @@ class App:
             self.free_rects = rects
             self.refresh_preview()
 
+
     def update_dir_frame_visibility(self):
         if self.cut_mode.get() in ("grid", "free"):
             self.dir_frame.grid_remove()
         else:
             self.dir_frame.grid()
+
 
     def refresh_preview(self):
         if self.preview_window and self.preview_canvas and self.original_img:
@@ -1603,40 +1664,48 @@ class App:
 
     def on_format_change(self, event=None):
         fmt = self.format_var.get()
-        if fmt == "JPEG":
-            self.quality_var.set("95")
-            self.hint_label.config(text="(JPEG质量 1-100)")
-        elif fmt == "PNG":
-            self.quality_var.set("0")
-            self.hint_label.config(text="(PNG压缩级别 0-9)")
-        elif fmt == "WEBP":
-            self.quality_var.set("80")
-            self.hint_label.config(text="(WebP质量 1-100，推荐80)")
+        config = FORMAT_CONFIG.get(fmt, {})
+        q_range = config.get('quality_range')
+        default_q = config.get('default_quality')
+        if q_range is not None:
+            min_q, max_q = q_range
+            self.hint_label.config(text=f"({fmt}: {min_q}-{max_q})")
+            try:
+                cur = int(self.quality_var.get())
+                if cur < min_q:
+                    self.quality_var.set(str(min_q))
+                elif cur > max_q:
+                    self.quality_var.set(str(max_q))
+            except:
+                self.quality_var.set(str(default_q if default_q is not None else min_q))
         else:
             self.hint_label.config(text="(此格式忽略质量参数)")
 
+
     def get_save_params(self, fmt):
-        params = {"format": fmt}
-        qs = self.quality_var.get().strip()
-        if fmt == "JPEG":
+        config = FORMAT_CONFIG.get(fmt)
+        if not config:
+            return {"format": fmt}
+        save_params = {}
+        q_range = config.get('quality_range')
+        if q_range is not None:
+            min_q, max_q = q_range
             try:
-                q = max(1, min(100, int(qs)))
-                params["quality"] = q
+                q_val = int(self.quality_var.get())
+                q_val = max(min_q, min(max_q, q_val))
             except:
-                params["quality"] = 95
-        elif fmt == "PNG":
-            try:
-                l = max(0, min(9, int(qs)))
-                params["compress_level"] = l
-            except:
-                params["compress_level"] = 6
-        elif fmt == "WEBP":
-            try:
-                q = max(1, min(100, int(qs)))
-                params["quality"] = q
-            except:
-                params["quality"] = 80
-        return params
+                q_val = config.get('default_quality', min_q)
+            for key, param_name in config['save_params'].items():
+                if key == 'quality':
+                    save_params['quality'] = q_val
+                elif key == 'compress_level':
+                    save_params['compress_level'] = q_val
+                else:
+                    save_params[key] = param_name
+        else:
+            save_params.update(config['save_params'])
+        save_params['format'] = fmt
+        return save_params
 
     def start_cutting(self):
         img_path = self.entry1.get().strip()
@@ -1657,10 +1726,14 @@ class App:
         try:
             image = Image.open(img_path)
             fmt = self.format_var.get()
-            if fmt in ("JPEG", "WEBP") and image.mode in ("RGBA", "LA", "P"):
-                image = image.convert("RGB")
+            config = FORMAT_CONFIG.get(fmt, {})
+            ext = config.get('extension', '.' + fmt.lower()).lstrip('.')
+            if not ext:
+                ext = fmt.lower()
+            target_mode = config.get('mode')
+            if target_mode and image.mode != target_mode:
+                image = image.convert(target_mode)
             save_params = self.get_save_params(fmt)
-            ext = fmt.lower()
             mode = self.cut_mode.get()
 
             # 计算总块数（用于进度条）
@@ -1728,25 +1801,26 @@ class App:
             if hasattr(self, 'progress_win') and self.progress_win.winfo_exists():
                 self.progress_win.destroy()
 
+
     def _cut_worker(self, image, mode, out_dir, ext, save_params, total_pieces):
-        # ================== 新增：生成唯一文件前缀 ==================
+        # ================== 生成唯一文件前缀 ==================
         from datetime import datetime
         base_name = os.path.splitext(os.path.basename(self.entry1.get().strip()))[0]
         mode_letter = {"grid": "G", "smart": "S", "advanced": "A", "free": "F"}[mode]
-        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S_%f")  # 含微秒，确保唯一
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
         file_prefix = f"{base_name}_{mode_letter}_{timestamp}"
         # ==========================================================
-    
+
         try:
             def progress_callback(current):
                 self.master.after(0, self._update_progress, current)
-    
+
             stop_check = lambda: self.cancel_flag
-    
+
             if mode == "grid":
                 rows = int(self.rows_entry.get())
                 cols = int(self.cols_entry.get())
-                cut_grid(image, rows, cols, out_dir, ext, save_params, progress_callback, file_prefix, stop_check)  # 传入前缀
+                cut_grid(image, rows, cols, out_dir, ext, save_params, progress_callback, file_prefix, stop_check)
                 msg = f"标准网格切割完成！共生成 {rows * cols} 张小图"
             elif mode == "smart":
                 blocks, ratios = parse_smart_pattern(self.digit_entry.get().strip())
@@ -1768,13 +1842,14 @@ class App:
                 rects = self.free_rects
                 cut_free(image, rects, out_dir, ext, save_params, progress_callback, file_prefix, stop_check)
                 msg = f"自由模式切割完成！共生成 {len(rects)} 张小图"
-    
+
             self.master.after(0, self._cut_done, True, msg, out_dir)
-    
+
         except StopCutting:
             self.master.after(0, self._cut_cancelled)
         except Exception as e:
             self.master.after(0, self._cut_done, False, str(e), None)
+
 
     def _update_progress(self, current):
         if hasattr(self, 'progress_win') and self.progress_win.winfo_exists():
@@ -1782,8 +1857,8 @@ class App:
             self.progress_label.config(text=f"{current} / {self.progress_var.get('maximum')}")
             self.progress_win.update_idletasks()
 
+
     def _cut_done(self, success, info, out_dir=None):
-        # 恢复按钮
         for btn in self.master.winfo_children():
             if isinstance(btn, tk.Button) and btn.cget("text") in ("开始切割", "批量"):
                 btn.config(state=tk.NORMAL)
@@ -1797,8 +1872,8 @@ class App:
         else:
             messagebox.showerror("错误", f"切割失败: {info}")
 
+
     def _cut_cancelled(self):
-        # 恢复按钮
         for btn in self.master.winfo_children():
             if isinstance(btn, tk.Button) and btn.cget("text") in ("开始切割", "批量"):
                 btn.config(state=tk.NORMAL)
@@ -1852,6 +1927,7 @@ class App:
                 self.preview_canvas.delete(self.rect_id)
                 self.rect_id = None
 
+
     def on_mouse_down(self, event):
         if not self.drawing_enabled or not self.original_img:
             return
@@ -1866,6 +1942,7 @@ class App:
             self.start_x, self.start_y, self.start_x, self.start_y,
             outline="orange", width=2, tags="temp_rect"
         )
+
 
     def on_mouse_move(self, event):
         if self.start_x is None or self.rect_id is None:
@@ -1896,6 +1973,7 @@ class App:
                 canvas_x = max(x0, min(x0 + w, canvas_x))
                 canvas_y = max(y0, min(y0 + h, canvas_y))
         self.preview_canvas.coords(self.rect_id, self.start_x, self.start_y, canvas_x, canvas_y)
+
 
     def on_mouse_up(self, event):
         if self.start_x is None or self.rect_id is None:
@@ -1949,22 +2027,26 @@ class App:
         self.start_x = None
         self.start_y = None
 
+
     def delete_selected_rect(self, event):
         if self.free_rects:
             self.free_rects.pop()
             self.update_free_text_from_rects()
             self.refresh_preview()
 
+
     def clear_all_rects(self):
         self.free_rects.clear()
         self.update_free_text_from_rects()
         self.refresh_preview()
+
 
     def delete_last_rect(self):
         if self.free_rects:
             self.free_rects.pop()
             self.update_free_text_from_rects()
             self.refresh_preview()
+
 
     def update_free_text_from_rects(self):
         lines = []
@@ -1974,8 +2056,10 @@ class App:
         self.free_text.insert("1.0", "\n".join(lines))
         self.on_free_param_changed()
 
+
     def on_ratio_lock_changed(self):
         pass
+
 
     def quit_app(self):
         # 强制停止所有后台任务（设置标志）
