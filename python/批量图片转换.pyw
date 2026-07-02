@@ -54,7 +54,7 @@ FORMAT_CONFIG = {
         'extension': '.png',
         'save_params': {'compress_level': 'compress_level'},
         'quality_range': (0, 9),
-        'default_quality': 2,
+        'default_quality': 4,
         'mode': None,
         'supports_exif': False,
     },
@@ -230,6 +230,7 @@ class TemplateEditor(ttk.Frame):
         self._create_widgets()
         self._setup_traces()
         self._ico_sizes = [(16,16), (32,32), (48,48), (64,64), (128,128), (256,256)]
+        self._loading_preset = False
         self._init_enhance_state()
         if self.default_expanded:
             self._toggle_enhance()
@@ -505,7 +506,7 @@ class TemplateEditor(ttk.Frame):
 
     def _on_format_changed(self, *args):
         fmt = self.format_var.get()
-        
+        # ---- 处理 ICO 显示切换 ----
         if fmt == "ICO":
             self.quality_label.pack_forget()
             self.quality_scale.pack_forget()
@@ -516,22 +517,35 @@ class TemplateEditor(ttk.Frame):
             self.quality_label.pack(side=tk.LEFT, padx=(10,2))
             self.quality_scale.pack(side=tk.LEFT, padx=2)
             self.quality_spin.pack(side=tk.LEFT, padx=2)
-            
-            config = FORMAT_CONFIG.get(fmt, {})
-            q_range = config.get('quality_range')
-            default_q = config.get('default_quality')
-            
-            if fmt == "PNG":
-                # 滑块反向：左边9（最高压缩），右边0（无压缩）
-                self.quality_scale.config(from_=9, to=0)
-                self.quality_spin.config(from_=0, to=9)  # Spinbox正常
-                new_val = default_q if default_q is not None else (q_range[0] if q_range else 6)
-                self.quality_var.set(new_val)
+        
+        # ---- 获取当前格式配置 ----
+        config = FORMAT_CONFIG.get(fmt, {})
+        q_range = config.get('quality_range')
+        
+        # ---- 调整滑块范围（始终执行） ----
+        if fmt == "PNG":
+            self.quality_label.config(text="压缩:")
+            self.quality_scale.config(from_=9, to=0)
+            self.quality_spin.config(from_=0, to=9)
+        else:
+            self.quality_label.config(text="质量:")
+            self.quality_scale.config(from_=1, to=100)
+            self.quality_spin.config(from_=1, to=100)
+        
+        # ---- 如果是加载预设，跳过设置默认值，但执行预览更新 ----
+        if self._loading_preset:
+            self._on_settings_changed()
+            return
+        
+        # ---- 用户手动切换时，设置默认值 ----
+        default_q = config.get('default_quality')
+        if q_range is not None:
+            if default_q is not None:
+                new_val = default_q
             else:
-                self.quality_scale.config(from_=1, to=100)
-                self.quality_spin.config(from_=1, to=100)
-                new_val = default_q if default_q is not None else (q_range[0] if q_range else 85)
-                self.quality_var.set(new_val)
+                new_val = q_range[0]
+            self.quality_var.set(new_val)
+        # 对于无质量参数的格式（如 BMP），可保留原值
         
         self._on_settings_changed()
 
@@ -774,64 +788,60 @@ class TemplateEditor(ttk.Frame):
         return settings
     
     def set_settings(self, settings):
-        self.format_var.set(settings.get('format', 'JPEG'))
-        self.quality_var.set(settings.get('quality', 85))
-        self.rotation_var.set(settings.get('rotation', '0°'))
-        self.h_flip_var.set(settings.get('h_flip', False))
-        self.v_flip_var.set(settings.get('v_flip', False))
-        self.resize_mode_var.set(settings.get('resize_mode', '无调整'))
-        self.resize_width_var.set(settings.get('resize_w', 800))
-        self.resize_height_var.set(settings.get('resize_h', 600))
-        self.crop_enabled_var.set(settings.get('crop_enabled', False))
-        self.crop_x_var.set(settings.get('crop_x', '0'))
-        self.crop_y_var.set(settings.get('crop_y', '0'))
-        self.crop_w_var.set(settings.get('crop_w', 'iw'))
-        self.crop_h_var.set(settings.get('crop_h', 'ih'))
-        self.brightness_enable.set(settings.get('brightness_enable', False))
-        self.brightness_var.set(settings.get('brightness_val', 0))
-        self.contrast_enable.set(settings.get('contrast_enable', False))
-        self.contrast_var.set(settings.get('contrast_val', 0))
-        self.color_enable.set(settings.get('color_enable', False))
-        self.r_var.set(settings.get('r_gain', 0))
-        self.g_var.set(settings.get('g_gain', 0))
-        self.b_var.set(settings.get('b_gain', 0))
-        self.saturation_enable.set(settings.get('saturation_enable', False))
-        self.saturation_var.set(settings.get('saturation_val', 0))
-        self.sharpen_enable.set(settings.get('sharpen_enable', False))
-        self.sharpen_var.set(settings.get('sharpen_val', 0))
-        
-        # 文字水印参数
-        self.watermark_enable.set(settings.get('watermark_enable', False))
-        self.watermark_text_var.set(settings.get('watermark_text', 'Watermark'))
-        self.watermark_font_var.set(settings.get('watermark_font', 'Arial'))
-        self.watermark_size_var.set(settings.get('watermark_size', 36))
-        self.watermark_pos_var.set(settings.get('watermark_position', '右下'))
-        self.watermark_opacity_var.set(settings.get('watermark_opacity', 80))
-        
-        self.preview_size_var.set(settings.get('preview_size', 600))
+        self._loading_preset = True   # 开始加载预设
+        try:
+            self.format_var.set(settings.get('format', 'JPEG'))
+            self.quality_var.set(settings.get('quality', 85))
+            self.rotation_var.set(settings.get('rotation', '0°'))
+            self.h_flip_var.set(settings.get('h_flip', False))
+            self.v_flip_var.set(settings.get('v_flip', False))
+            self.resize_mode_var.set(settings.get('resize_mode', '无调整'))
+            self.resize_width_var.set(settings.get('resize_w', 800))
+            self.resize_height_var.set(settings.get('resize_h', 600))
+            self.crop_enabled_var.set(settings.get('crop_enabled', False))
+            self.crop_x_var.set(settings.get('crop_x', '0'))
+            self.crop_y_var.set(settings.get('crop_y', '0'))
+            self.crop_w_var.set(settings.get('crop_w', 'iw'))
+            self.crop_h_var.set(settings.get('crop_h', 'ih'))
+            self.brightness_enable.set(settings.get('brightness_enable', False))
+            self.brightness_var.set(settings.get('brightness_val', 0))
+            self.contrast_enable.set(settings.get('contrast_enable', False))
+            self.contrast_var.set(settings.get('contrast_val', 0))
+            self.color_enable.set(settings.get('color_enable', False))
+            self.r_var.set(settings.get('r_gain', 0))
+            self.g_var.set(settings.get('g_gain', 0))
+            self.b_var.set(settings.get('b_gain', 0))
+            self.saturation_enable.set(settings.get('saturation_enable', False))
+            self.saturation_var.set(settings.get('saturation_val', 0))
+            self.sharpen_enable.set(settings.get('sharpen_enable', False))
+            self.sharpen_var.set(settings.get('sharpen_val', 0))
+            # 文字水印参数
+            self.watermark_enable.set(settings.get('watermark_enable', False))
+            self.watermark_text_var.set(settings.get('watermark_text', 'Watermark'))
+            self.watermark_font_var.set(settings.get('watermark_font', 'Arial'))
+            self.watermark_size_var.set(settings.get('watermark_size', 36))
+            self.watermark_pos_var.set(settings.get('watermark_position', '右下'))
+            self.watermark_opacity_var.set(settings.get('watermark_opacity', 80))
+            self.preview_size_var.set(settings.get('preview_size', 600))
+            # 颜色加载
+            self.watermark_color_var.set(settings.get('watermark_color', '#FFFFFF'))
+            if hasattr(self, 'color_preview'):
+                self.color_preview.config(bg=self.watermark_color_var.get())
+            if self.include_exif_date_delete:
+                self.keep_exif_var.set(settings.get('keep_exif', False))
+                self.preserve_date_var.set(settings.get('preserve_original_date', False))
+                self.delete_original_var.set(settings.get('delete_original', False))
+            ico_sizes = settings.get('ico_sizes')
+            if ico_sizes and isinstance(ico_sizes, list):
+                self._ico_sizes = [tuple(s) for s in ico_sizes if isinstance(s, (tuple, list)) and len(s)==2]
+            # 强制更新显示状态，但此时 _loading_preset 为 True，会跳过默认值设置
+            self._on_format_changed()
+            self._on_resize_mode_changed()
+            self._update_enhance_enable()
+            self._on_settings_changed()
+        finally:
+            self._loading_preset = False   # 结束加载预设
 
-
-        # 颜色加载
-        self.watermark_color_var.set(settings.get('watermark_color', '#FFFFFF'))
-        if hasattr(self, 'color_preview'):
-            self.color_preview.config(bg=self.watermark_color_var.get())
-
-
-        if self.include_exif_date_delete:
-            self.keep_exif_var.set(settings.get('keep_exif', False))
-            self.preserve_date_var.set(settings.get('preserve_original_date', False))
-            self.delete_original_var.set(settings.get('delete_original', False))
-
-
-        ico_sizes = settings.get('ico_sizes')
-        if ico_sizes and isinstance(ico_sizes, list):
-            self._ico_sizes = [tuple(s) for s in ico_sizes if isinstance(s, (tuple, list)) and len(s)==2]
-        # 确保格式变化触发显示切换（在 set_settings 最后调用 _on_format_changed）
-        self._on_format_changed()  # 强制更新显示状态
-        
-        self._on_resize_mode_changed()
-        self._update_enhance_enable()
-        self._on_settings_changed()
 
 
 class ImageConverter(TkinterDnD.Tk):
@@ -2684,14 +2694,27 @@ class ImageConverter(TkinterDnD.Tk):
             messagebox.showerror("错误", f"预设 '{name}' 不存在")
             return
         p = self.presets[name]
-        if 'output_dir' in p:
-            self.output_dir.set(os.path.normpath(p['output_dir']))
-        self.template_editor.set_settings(p)
-        if 'name_template' in p:
-            self.name_template_var.set(p['name_template'])
-        if 'duplicate_mode' in p:
-            self.duplicate_mode_var.set(p['duplicate_mode'])
+        
+        print(f"开始加载预设: {name}")          # 调试打印
+        try:
+            if 'output_dir' in p:
+                self.output_dir.set(os.path.normpath(p['output_dir']))
+            self.template_editor.set_settings(p)
+            if 'name_template' in p:
+                self.name_template_var.set(p['name_template'])
+            if 'duplicate_mode' in p:
+                self.duplicate_mode_var.set(p['duplicate_mode'])
+            print("预设加载完成，准备弹窗")      # 调试打印
+        except Exception as e:
+            print(f"加载预设时发生异常: {e}")   # 输出到控制台
+            import traceback
+            traceback.print_exc()               # 打印完整堆栈
+            messagebox.showerror("错误", f"加载预设失败: {e}")
+            return
+        
+        # 如果上面没有 return，这里一定会执行
         messagebox.showinfo("成功", f"预设 '{name}' 已加载")
+        print("弹窗已调用")                     # 调试打印
 
     def delete_preset(self):
         if self.converting:
