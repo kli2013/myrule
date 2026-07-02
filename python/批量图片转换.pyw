@@ -54,7 +54,7 @@ FORMAT_CONFIG = {
         'extension': '.png',
         'save_params': {'compress_level': 'compress_level'},
         'quality_range': (0, 9),
-        'default_quality': 6,
+        'default_quality': 2,
         'mode': None,
         'supports_exif': False,
     },
@@ -505,20 +505,34 @@ class TemplateEditor(ttk.Frame):
 
     def _on_format_changed(self, *args):
         fmt = self.format_var.get()
+        
         if fmt == "ICO":
-            # 隐藏质量控件
             self.quality_label.pack_forget()
             self.quality_scale.pack_forget()
             self.quality_spin.pack_forget()
-            # 显示按钮（按钮在质量控件之后，所以 pack 会排在最后，但因为我们隐藏了前面的，按钮会占据整个容器位置，顺序正确）
             self.ico_size_btn.pack(side=tk.LEFT, padx=2)
         else:
-            # 隐藏按钮
             self.ico_size_btn.pack_forget()
-            # 按原顺序重新显示质量控件
             self.quality_label.pack(side=tk.LEFT, padx=(10,2))
             self.quality_scale.pack(side=tk.LEFT, padx=2)
             self.quality_spin.pack(side=tk.LEFT, padx=2)
+            
+            config = FORMAT_CONFIG.get(fmt, {})
+            q_range = config.get('quality_range')
+            default_q = config.get('default_quality')
+            
+            if fmt == "PNG":
+                # 滑块反向：左边9（最高压缩），右边0（无压缩）
+                self.quality_scale.config(from_=9, to=0)
+                self.quality_spin.config(from_=0, to=9)  # Spinbox正常
+                new_val = default_q if default_q is not None else (q_range[0] if q_range else 6)
+                self.quality_var.set(new_val)
+            else:
+                self.quality_scale.config(from_=1, to=100)
+                self.quality_spin.config(from_=1, to=100)
+                new_val = default_q if default_q is not None else (q_range[0] if q_range else 85)
+                self.quality_var.set(new_val)
+        
         self._on_settings_changed()
 
     def _edit_ico_sizes(self):
@@ -1280,31 +1294,34 @@ class ImageConverter(TkinterDnD.Tk):
                     actual_fmt = name
                     break
             if actual_fmt is None:
-                actual_fmt = 'JPEG'  # 默认
+                actual_fmt = 'JPEG'
             config = FORMAT_CONFIG.get(actual_fmt)
         else:
             config = self._get_format_config(fmt)
+    
         if not config:
             return {}
+    
         save_params = {}
         quality_range = config.get('quality_range')
-        if quality_range is not None and 'quality' in config['save_params']:
+    
+        if quality_range is not None:
             min_q, max_q = quality_range
             q_clamped = max(min_q, min(max_q, quality))
-            save_params['quality'] = q_clamped
-        # 处理 compress_level 等其他参数
-        for key, val in config['save_params'].items():
-            if key == 'quality':
-                continue  # 已处理
-            if key == 'compress_level':
-                # 质量滑块 1-100 映射到压缩级别 0-9
-                if quality_range is not None and quality_range == (0, 9):
-                    comp = int((100 - quality) * 9 / 99)
-                    save_params['compress_level'] = comp
+    
+            for key, val in config['save_params'].items():
+                if key == 'quality':
+                    save_params['quality'] = q_clamped
+                elif key == 'compress_level':
+                    # 修改点：PNG 质量滑块已改为 0-9 范围，
+                    # 因此直接使用 q_clamped，无需映射公式
+                    save_params['compress_level'] = q_clamped
                 else:
                     save_params[key] = val
-            else:
-                save_params[key] = val
+        else:
+            # 无质量参数（如 BMP、ICO 等），直接复制 save_params
+            save_params.update(config['save_params'])
+    
         return save_params
 
     def _get_output_mode(self, img, fmt, original_path=None):
