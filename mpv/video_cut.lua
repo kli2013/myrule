@@ -6,7 +6,6 @@
 -- use_bom=yes
 -- prefer_copy=yes
 
-
 local utils = require 'mp.utils'
 local options = require 'mp.options'
 
@@ -68,7 +67,7 @@ local function toggle_marking_mode()
         segments = {}
         current_segment_start = nil
         update_chapter_marks()
-        mp.osd_message("已进入标记模式！\n→ n : 标记起止\n→ c : 无损切割 + 输出精确命令\n→ Esc : 退出", 5)
+        mp.osd_message("已进入标记模式！\n→ n : 标记起止\n→ c : 无损切割 + 输出精确命令\n→ Ctrl+Shift+c : 仅导出命令到日志+剪贴板\n→ Esc : 退出", 5)
     else
         marking_mode = false
         segments = {}
@@ -78,58 +77,60 @@ local function toggle_marking_mode()
     end
 end
 
--- ====================== 剪贴板复制（无多余空格/换行） ======================
--- ====================== 剪贴板复制（极速纯净版，无多余空格/换行） ======================
+-- ====================== 剪贴板复制（支持多行） ======================
 local clipboard_cmd = nil
 
 local function init_clipboard()
     local platform = mp.get_property("platform")
     if platform == "windows" then
-        -- Windows: echo|set /p= 避免换行，且无空格
         clipboard_cmd = function(text)
-            utils.subprocess({
-                args = { "cmd", "/c", "echo|set /p=" .. text .. "|clip" },
-                cancellable = false
-            })
-        end
-    elseif platform == "linux" then
-        local has_xclip = (utils.subprocess({
-            args = { "which", "xclip" },
-            cancellable = false
-        }).status == 0)
-        if has_xclip then
-            clipboard_cmd = function(text)
+            local temp = os.tmpname()
+            local f = io.open(temp, "w")
+            if f then
+                f:write(text)
+                f:close()
+                -- 使用 PowerShell 读取 UTF-8 文件并写入剪贴板
                 utils.subprocess({
-                    args = { "sh", "-c", "printf '%s' '" .. text .. "' | xclip -selection clipboard" },
+                    args = {
+                        "powershell", "-command",
+                        "Get-Content -Path '" .. temp .. "' -Encoding UTF8 | Set-Clipboard"
+                    },
                     cancellable = false
                 })
+                os.remove(temp)
             end
-        else
-            local has_xsel = (utils.subprocess({
-                args = { "which", "xsel" },
-                cancellable = false
-            }).status == 0)
-            if has_xsel then
-                clipboard_cmd = function(text)
-                    utils.subprocess({
-                        args = { "sh", "-c", "printf '%s' '" .. text .. "' | xsel -b -i" },
-                        cancellable = false
-                    })
-                end
-            else
-                mp.msg.warn("未找到 xclip 或 xsel")
-                clipboard_cmd = function() end
+        end
+    elseif platform == "linux" then
+        local has_xclip = (utils.subprocess({ args = { "which", "xclip" }, cancellable = false }).status == 0)
+        local clip_cmd = has_xclip and "xclip -selection clipboard" or "xsel -b -i"
+        clipboard_cmd = function(text)
+            local temp = os.tmpname()
+            local f = io.open(temp, "w")
+            if f then
+                f:write(text)
+                f:close()
+                utils.subprocess({
+                    args = { "sh", "-c", "cat " .. temp .. " | " .. clip_cmd },
+                    cancellable = false
+                })
+                os.remove(temp)
             end
         end
     elseif platform == "darwin" then
         clipboard_cmd = function(text)
-            utils.subprocess({
-                args = { "sh", "-c", "printf '%s' '" .. text .. "' | pbcopy" },
-                cancellable = false
-            })
+            local temp = os.tmpname()
+            local f = io.open(temp, "w")
+            if f then
+                f:write(text)
+                f:close()
+                utils.subprocess({
+                    args = { "sh", "-c", "cat " .. temp .. " | pbcopy" },
+                    cancellable = false
+                })
+                os.remove(temp)
+            end
         end
     else
-        mp.msg.warn("不支持的平台")
         clipboard_cmd = function() end
     end
 end
@@ -142,10 +143,10 @@ local function copy_to_clipboard(text)
     end
 end
 
--- ====================== 标记时间点（修改后） ======================
+-- ====================== 标记时间点 ======================
 local function mark_current_time()
     if not marking_mode then
-        -- 标记模式外：复制当前时间码到剪贴板（基于 time-pos）
+        -- 标记模式外：复制当前时间码到剪贴板（单行）
         local pos = mp.get_property_number("time-pos")
         if pos then
             local hours = math.floor(pos / 3600)
@@ -167,17 +168,15 @@ local function mark_current_time()
     if not current_segment_start then
         current_segment_start = pos
         table.insert(segments, { start = pos })
-        mp.osd_message(string.format("✓ 开始点: %.3fs", pos), 2)
+        mp.osd_message(string.format("✓ 开始点: %.3f", pos), 2)
     else
         local n = #segments
         segments[n].end_ = pos
         current_segment_start = nil
-        mp.osd_message(string.format("✓ 结束点: %.3fs\n当前共 %d 个片段", pos, n), 3)
+        mp.osd_message(string.format("✓ 结束点: %.3f\n当前共 %d 个片段", pos, n), 3)
     end
     update_chapter_marks()
 end
-
-
 
 -- ====================== 构建命令字符串（智能引号） ======================
 local function need_quote(arg)
@@ -392,10 +391,116 @@ local function run_cut()
     mp.osd_message("标记状态已保留，可按 Esc 退出标记模式", 3)
 end
 
+-- ====================== 新增：仅导出命令到日志+剪贴板 ======================
+local function export_commands_only()
+    if not marking_mode or #segments == 0 then
+        mp.osd_message("没有标记片段", 3)
+        return
+    end
+
+    -- 检查未闭合片段
+    local open_segments = {}
+    for i, s in ipairs(segments) do
+        if s.start and not s.end_ then
+            table.insert(open_segments, i)
+        end
+    end
+    if #open_segments > 0 then
+        local warn_msg = string.format("⚠ 有 %d 个片段未标记终点（片段 %s），将被忽略",
+            #open_segments, table.concat(open_segments, ", "))
+        mp.osd_message(warn_msg, 5)
+        mp.msg.warn(warn_msg)
+    end
+
+    local valid = {}
+    for _, s in ipairs(segments) do
+        if s.start and s.end_ and s.start < s.end_ then
+            table.insert(valid, s)
+        end
+    end
+    if #valid == 0 then
+        mp.osd_message("没有有效片段", 3)
+        return
+    end
+
+    local path = mp.get_property("path")
+    if not path or path == "" then
+        mp.osd_message("无法获取文件路径", 3)
+        return
+    end
+
+    local dir, filename = utils.split_path(path)
+    if not dir then dir = "" end
+    local base = filename:match("(.+)%.[^%.]+$") or "output"
+    local ext = filename:match("(%.[^%.]+)$") or ".mp4"
+    local out_ext = (ext:lower() == ".ts" or ext:lower() == ".flv") and ".mp4" or ext
+
+    local ffmpeg = o.ffmpeg_path or 'ffmpeg.exe'
+
+    -- 确定日志文件路径
+    local log_file
+    if o.log_dir and o.log_dir ~= "" then
+        log_file = utils.join_path(o.log_dir, "cutlog.txt")
+        utils.subprocess({ args = { "cmd", "/c", "mkdir", o.log_dir, "/p" }, cancellable = false, playback_only = false })
+    else
+        log_file = utils.join_path(dir, "cutlog.txt")
+    end
+
+    write_cut_log("=====================================", log_file)
+    write_cut_log("导出命令时间: " .. os.date("%Y-%m-%d %H:%M:%S"), log_file)
+    write_cut_log("源文件: " .. path, log_file)
+    write_cut_log("模式: 仅导出精确命令（未执行切割）", log_file)
+    write_cut_log("-------------------------------------", log_file)
+
+    local scale_str = "scale=iw:ih,format=yuv420p"
+    local cmd_lines = {}  -- 用于收集所有命令
+
+    for i, seg in ipairs(valid) do
+        local duration = seg.end_ - seg.start
+        local s_str = string.format("%.2f", seg.start):gsub("%.", "-")
+        local e_str = string.format("%.2f", seg.end_):gsub("%.", "-")
+        local out = utils.join_path(dir, string.format("%s_cut_seg%d_%s-%s%s", base, i, s_str, e_str, out_ext))
+
+        local precise_args = {
+            "-accurate_seek",
+            "-i", path,
+            "-ss", string.format("%.3f", seg.start),
+            "-t", string.format("%.3f", duration),
+            "-vf", scale_str,
+            "-c:v", "libx265",
+            "-preset", "medium",
+            "-crf", "28",
+            "-c:a", "aac",
+            "-b:a", "128k",
+            "-ar", "44100",
+            "-map_metadata", "0",
+            "-movflags", "+faststart",
+            "-ignore_unknown",
+            "-avoid_negative_ts", "make_zero",
+            "-y", out
+        }
+        local precise_cmd = build_ffmpeg_command(ffmpeg, precise_args)
+        write_cut_log("[精确命令 " .. i .. "] " .. precise_cmd, log_file)
+        table.insert(cmd_lines, precise_cmd)
+    end
+
+    write_cut_log("-------------------------------------\n", log_file)
+
+    -- 复制所有命令到剪贴板
+    if #cmd_lines > 0 then
+        local all_cmds = table.concat(cmd_lines, "\n")
+        copy_to_clipboard(all_cmds)
+        mp.osd_message(string.format("✅ 精确命令已导出到日志: %s\n并已复制到剪贴板（%d 条）", log_file, #cmd_lines), 5)
+    else
+        mp.osd_message("没有有效的命令可导出", 3)
+    end
+end
+
 -- ====================== 快捷键绑定 ======================
 mp.add_key_binding("Ctrl+m", "toggle_marking_mode", toggle_marking_mode)
 mp.add_key_binding("n", "mark_current_time", mark_current_time)
-mp.add_key_binding("c", "confirm_marks", run_cut)  -- 执行无损切割 + 输出精确命令
+mp.add_key_binding("c", "confirm_marks", run_cut)          -- 执行无损切割 + 输出精确命令
+mp.add_key_binding("Ctrl+Shift+c", "export_commands_only", export_commands_only)  -- 仅导出命令到日志+剪贴板
 
 mp.add_key_binding("Esc", "exit_marking_mode", function()
     if marking_mode then toggle_marking_mode() end
