@@ -5,9 +5,7 @@ import tkinter as tk
 from tkinter import filedialog, messagebox, ttk
 from PIL import Image, ImageTk
 import re
-import ctypes
 
-# 尝试导入 tkinterdnd2（窗口内拖拽）
 try:
     from tkinterdnd2 import TkinterDnD, DND_FILES
     DND_AVAILABLE = True
@@ -18,26 +16,22 @@ except ImportError:
             pass
     DND_FILES = None
 
+SAVE_DIR = r"D:\123"   # 请替换为您自己的目录
+
 class ImageBrowser:
     def __init__(self, root):
         self.root = root
-        self.root.title("图片并排浏览 - 无边框整合版")
+        self.root.title("图片并排浏览")
         self.root.geometry("1200x700")
 
-        # ---------- 窗口居中 ----------
-        self.root.withdraw()  # 隐藏窗口
-        self.root.update_idletasks()  # 确保尺寸计算完成
-        screen_width = self.root.winfo_screenwidth()
-        screen_height = self.root.winfo_screenheight()
-        window_width = 1200
-        window_height = 700
-        x = (screen_width - window_width) // 2
-        y = (screen_height - window_height) // 2
-        self.root.geometry(f"{window_width}x{window_height}+{x}+{y}")
-        self.root.deiconify()  # 显示窗口
-
-        # 移除系统标题栏
-        self.root.overrideredirect(True)
+        # ---------- 窗口状态变量 ----------
+        self.fullscreen = False
+        self._switching = False
+        self.normal_geometry = None   # 保存普通窗口几何（含位置）
+        self.was_maximized = False    # 进入全屏前是否最大化
+        
+        self.save_dir = SAVE_DIR   # 读取全局路径
+        self.root.bind("<Alt-Key-s>", self.save_current_image)   # 绑定快捷键
 
         # ---------- 数据 ----------
         self.folder = ""
@@ -53,88 +47,14 @@ class ImageBrowser:
         self.last_width = 0
         self.last_height = 0
 
-        # ---------- 全屏状态 ----------
-        self.fullscreen = False
-        self.maximized = False
-        self.normal_geometry = None
-        self._switching = False
-        self.was_maximized = False  # 记录进入全屏前是否最大化
-        self.original_geometry = None
-
-
-        # ---------- 顶部容器（标题栏 + 控制栏） ----------
-        self.top_bar = tk.Frame(root, bg="#2c2c2c")
-        self.top_bar.pack_forget()
-        self.top_visible = False
+        # ---------- 控制栏 ----------
+        self.control_frame = tk.Frame(root, bg="#f0f0f0")
+        self.control_frame.place(x=0, y=0, relwidth=1.0)
+        self.control_frame.place_forget()
+        self.control_visible = False
         self.auto_hide_timer = None
 
-
-        # ----- 自定义标题栏 -----
-        self.title_bar = tk.Frame(self.top_bar, bg="#E2E2E2", relief='flat', bd=0)
-        self.title_bar.pack(side=tk.TOP, fill=tk.X)
-        
-        self.title_label = tk.Label(self.title_bar, text="图片并排浏览", bg="#E2E2E2", fg="black", font=("Microsoft YaHei", 10))
-        self.title_label.pack(side=tk.LEFT, padx=10, pady=5)
-        
-        # 按钮样式（基础）
-        btn_bg = "#E2E2E2"
-        btn_fg = "black"
-        btn_hover_minmax = "#CBCBCB"
-        btn_hover_close = "#E81123"
-        btn_hover_fg_close = "white"
-        
-        # 关闭按钮
-        btn_close = tk.Button(self.title_bar, text="✕", command=self.on_close,
-                              bg=btn_bg, fg=btn_fg, relief='flat', width=3, bd=0)
-        btn_close.pack(side=tk.RIGHT, padx=2)
-        
-        # 最大化按钮
-        btn_max = tk.Button(self.title_bar, text="□", command=self.maximize_window,
-                            bg=btn_bg, fg=btn_fg, relief='flat', width=3, bd=0)
-        btn_max.pack(side=tk.RIGHT, padx=2)
-        
-        # 最小化按钮
-        btn_min = tk.Button(self.title_bar, text="─", command=self.minimize_window,
-                            bg=btn_bg, fg=btn_fg, relief='flat', width=3, bd=0)
-        btn_min.pack(side=tk.RIGHT, padx=2)
-        
-        # 悬停效果绑定
-        def on_enter(event, btn, bg):
-            btn.config(bg=bg)
-        def on_leave(event, btn):
-            btn.config(bg=btn_bg)
-        
-        # 最小化和最大化悬停
-        btn_min.bind("<Enter>", lambda e: on_enter(e, btn_min, btn_hover_minmax))
-        btn_min.bind("<Leave>", lambda e: on_leave(e, btn_min))
-        btn_max.bind("<Enter>", lambda e: on_enter(e, btn_max, btn_hover_minmax))
-        btn_max.bind("<Leave>", lambda e: on_leave(e, btn_max))
-        
-        # 关闭按钮悬停（特殊颜色和文字颜色）
-        def on_enter_close(event):
-            btn_close.config(bg=btn_hover_close, fg=btn_hover_fg_close)
-        def on_leave_close(event):
-            btn_close.config(bg=btn_bg, fg=btn_fg)
-        btn_close.bind("<Enter>", on_enter_close)
-        btn_close.bind("<Leave>", on_leave_close)
-
-        # 拖拽移动
-        self.title_bar.bind("<ButtonPress-1>", self.start_move)
-        self.title_bar.bind("<B1-Motion>", self.on_move)
-        self.title_label.bind("<ButtonPress-1>", self.start_move)
-        self.title_label.bind("<B1-Motion>", self.on_move)
-
-        # 双击标题栏切换全屏
-        self.title_bar.bind("<Double-Button-1>", self.toggle_fullscreen)
-        self.title_label.bind("<Double-Button-1>", self.toggle_fullscreen)
-
-
-
-        # ----- 控制栏（菜单） -----
-        self.control_frame = tk.Frame(self.top_bar, bg="#f0f0f0")
-        self.control_frame.pack(side=tk.TOP, fill=tk.X)
-
-        # 控制栏内容（与之前相同）
+        # 构建控制栏内容
         btn_select = tk.Button(self.control_frame, text="📂 选择", command=self.select_folder)
         btn_select.pack(side=tk.LEFT, padx=2)
 
@@ -169,7 +89,6 @@ class ImageBrowser:
                                     textvariable=self.interval_var, width=5)
         spin_interval.pack(side=tk.LEFT, padx=2)
 
-        # 算法下拉
         self.algo_display = {
             "快速": Image.NEAREST,
             "双线性": Image.BILINEAR,
@@ -184,7 +103,6 @@ class ImageBrowser:
         algo_combo.pack(side=tk.LEFT, padx=2)
         algo_combo.bind("<<ComboboxSelected>>", self.on_algo_change)
 
-        # 列数
         tk.Label(self.control_frame, text="列数:").pack(side=tk.LEFT, padx=2)
         self.cols_var = tk.StringVar(value="3")
         cols_spin = ttk.Spinbox(self.control_frame, from_=2, to=6, increment=1,
@@ -194,7 +112,7 @@ class ImageBrowser:
         cols_spin.bind("<<Decrement>>", lambda e: self.root.after(10, self.on_cols_change))
         cols_spin.bind("<FocusOut>", lambda e: self.on_cols_change())
 
-        self.status_label = tk.Label(self.control_frame, text="", font=("", 9), anchor="e")
+        self.status_label = tk.Label(self.control_frame, text="", font=("Arial", 9), anchor="e")
         self.status_label.pack(side=tk.RIGHT, padx=10)
 
         # ---------- 图片显示 ----------
@@ -203,36 +121,31 @@ class ImageBrowser:
         self.image_label = tk.Label(self.image_frame, bg="black")
         self.image_label.pack(expand=True, fill=tk.BOTH)
 
-        # 图片区拖拽窗口
+        # 图片区交互
         self.image_label.bind("<ButtonPress-1>", self.start_move)
         self.image_label.bind("<B1-Motion>", self.on_move)
         self.image_label.bind("<Double-Button-1>", self.toggle_maximize)
+        self.image_label.bind("<MouseWheel>", self.on_mouse_wheel)
 
         # ---------- 事件绑定 ----------
         self.root.bind("<Configure>", self.on_resize)
         self.root.bind("<Key>", self.on_key_press)
+
         self.root.bind_all("<Escape>", self.toggle_fullscreen)
         self.root.bind_all("<Return>", self.toggle_fullscreen)
-
         self.root.bind_all("<Alt-Key-f>", self.toggle_fullscreen)
         self.root.bind_all("<Alt-Key-F>", self.toggle_fullscreen)
 
-        # Alt 快捷键
         self.root.bind("<Alt-Key-1>", lambda e: self.set_mode_by_value("sequential") or "break")
         self.root.bind("<Alt-Key-2>", lambda e: self.set_mode_by_value("shuffle") or "break")
         self.root.bind("<Alt-Key-3>", lambda e: self.set_mode_by_value("random") or "break")
         self.root.bind("<Alt-Key-q>", lambda e: self.on_close() or "break")
         self.root.bind("<Alt-Key-Q>", lambda e: self.on_close() or "break")
-
-        
-        # Alt+4 切换自动播放
         self.root.bind("<Alt-Key-4>", lambda e: chk_auto.invoke() or "break")
 
-        # Ctrl+数字
         for i in range(1, 10):
             self.root.bind(f"<Control-Key-{i}>", lambda e, sec=i: self.set_interval(sec) or "break")
 
-        # 鼠标移动检测（显示顶部栏）
         self.root.bind('<Motion>', self.on_mouse_move)
 
         # ---------- 窗口内拖拽 ----------
@@ -249,10 +162,24 @@ class ImageBrowser:
         self.auto_timer = None
         self.auto_interval = 2.0
 
-        # ---------- 处理命令行参数 ----------
+        # ---------- 处理命令行 ----------
         self.root.after(100, self.process_command_line)
 
-    # ---------- 窗口移动 ----------
+        # ---------- 窗口居中初始化 ----------
+        self.root.withdraw()
+        self.root.update_idletasks()
+        sw = self.root.winfo_screenwidth()
+        sh = self.root.winfo_screenheight()
+        w = 1200
+        h = 700
+        x = (sw - w) // 2
+        y = (sh - h) // 2
+        geom = f"{w}x{h}+{x}+{y}"
+        self.root.geometry(geom)
+        self.normal_geometry = geom  # 保存初始普通几何
+        self.root.deiconify()
+
+    # ---------- 窗口拖拽移动 ----------
     def start_move(self, event):
         self.x = event.x
         self.y = event.y
@@ -263,142 +190,153 @@ class ImageBrowser:
         x = self.root.winfo_x() + deltax
         y = self.root.winfo_y() + deltay
         self.root.geometry(f"+{x}+{y}")
+        # 如果是普通窗口，更新普通几何
+        if not self.fullscreen and self.root.state() == 'normal':
+            self.normal_geometry = self.root.geometry()
 
-    # ---------- 窗口控制 ----------
-    def minimize_window(self):
-        self.root.iconify()
-
+    # ---------- 双击切换最大化/普通 ----------
     def toggle_maximize(self, event=None):
         if self.fullscreen:
-            self.toggle_fullscreen()
-            self.root.after(50, self._do_maximize)
             return
-        self.maximize_window()
-
-
-    def maximize_window(self):
-        """标准最大化（保留任务栏）"""
-        if self.fullscreen:
-            self.toggle_fullscreen()
-            self.root.after(50, self._do_maximize)
-            return
-    
-        if self.maximized:
-            # 还原到普通窗口
-            if self.original_geometry:
-                self.root.geometry(self.original_geometry)
+        if self.root.state() == 'zoomed':
+            # 从最大化切换到普通：恢复普通几何
+            self.root.state('normal')
+            if self.normal_geometry:
+                self.root.geometry(self.normal_geometry)
             else:
                 self.root.geometry("1200x700")
-            self.maximized = False
         else:
-            # 保存当前普通几何（未最大化）
-            self.original_geometry = self.root.geometry()
-            self._do_maximize()
-    
-    def _do_maximize(self):
-        """执行最大化（获取工作区尺寸）"""
-        try:
-            import ctypes
-            user32 = ctypes.windll.user32
-            rect = ctypes.wintypes.RECT()
-            user32.SystemParametersInfoW(0x0030, 0, ctypes.byref(rect), 0)
-            work_w = rect.right - rect.left
-            work_h = rect.bottom - rect.top
-        except:
-            work_w = self.root.winfo_screenwidth()
-            work_h = self.root.winfo_screenheight() - 30
-        self.root.geometry(f"{work_w}x{work_h}+0+0")
-        self.maximized = True
-    
+            # 从普通切换到最大化：保存普通几何
+            self.normal_geometry = self.root.geometry()
+            self.root.state('zoomed')
+
+    # ---------- 滚轮切换 ----------
+    def on_mouse_wheel(self, event):
+        if event.delta > 0:
+            self.prev_batch()
+        else:
+            self.next_batch()
+        return "break"
+
+    # ---------- 全屏切换（修复最大化→全屏后普通几何丢失） ----------
     def toggle_fullscreen(self, event=None):
         if not self.fullscreen:
-            # 进入全屏前保存普通几何（非最大化）
-            if self.maximized:
-                # 如果当前是最大化，则使用之前保存的原始几何（普通窗口尺寸）
-                if not self.original_geometry:
-                    # 如果没有保存过，则先还原到默认尺寸再保存（防止丢失）
-                    self.root.geometry("1200x700")
-                    self.root.update()
-                    self.original_geometry = self.root.geometry()
-            else:
-                # 当前是普通窗口，直接保存
-                self.original_geometry = self.root.geometry()
-            # 保存是否最大化状态
-            self.was_maximized = self.maximized
-    
-        self.fullscreen = not self.fullscreen
-        self._switching = True
-        if self.resize_job:
-            self.root.after_cancel(self.resize_job)
-            self.resize_job = None
-    
-        if self.fullscreen:
-            self.root.geometry("+0+0")
-            self.root.update()
-            screen_w = self.root.winfo_screenwidth()
-            screen_h = self.root.winfo_screenheight()
-            self.root.geometry(f"{screen_w}x{screen_h}+0+0")
-            self.root.attributes('-topmost', True)
-            self.maximized = False
-        else:
-            self.root.attributes('-topmost', False)
+            # --- 进入全屏前：强制保存普通几何信息 ---
+            # 1. 记录当前是否处于最大化状态
+            self.was_maximized = (self.root.state() == 'zoomed')
+            
+            # 2. 关键修复：无论是否最大化，都获取当前的普通几何状态
+            # 如果当前是最大化，先临时恢复普通状态以获取准确的几何数据
             if self.was_maximized:
-                self._do_maximize()
-            else:
-                if self.original_geometry:
-                    self.root.geometry(self.original_geometry)
+                self.root.state('normal')
+                # 强制更新以确保 geometry() 获取的是最新数据
+                self.root.update_idletasks()
+            
+            # 3. 保存普通几何（位置和大小）
+            self.normal_geometry = self.root.geometry()
+            
+            # 4. 如果刚才为了获取数据而取消了最大化，现在重新最大化（保持界面一致）
+            if self.was_maximized:
+                self.root.state('zoomed')
+                
+            # 5. 进入全屏
+            self.fullscreen = True
+            self._switching = True
+            if self.resize_job:
+                self.root.after_cancel(self.resize_job)
+                self.resize_job = None
+                
+            self.root.attributes('-fullscreen', True)
+            self.control_frame.place_forget()
+            self.control_visible = False
+            if self.auto_hide_timer:
+                self.root.after_cancel(self.auto_hide_timer)
+                self.auto_hide_timer = None
+                
+        else:
+            # --- 退出全屏：恢复状态 ---
+            self.fullscreen = False
+            self._switching = True
+            if self.resize_job:
+                self.root.after_cancel(self.resize_job)
+                self.resize_job = None
+                
+            self.root.attributes('-fullscreen', False)
+            
+            # 根据进入全屏前的状态进行恢复
+            if self.was_maximized:
+                # 如果之前是最大化，先恢复普通状态再最大化
+                self.root.state('normal')
+                if self.normal_geometry:
+                    self.root.geometry(self.normal_geometry)
                 else:
                     self.root.geometry("1200x700")
+                # 延迟最大化以确保位置正确
+                self.root.after(10, lambda: self.root.state('zoomed'))
+            else:
+                # 如果之前是普通状态，直接恢复几何
+                if self.normal_geometry:
+                    self.root.geometry(self.normal_geometry)
+                else:
+                    self.root.geometry("1200x700")
+            
             self.was_maximized = False
-    
-        self.last_width = 0
-        self.last_height = 0
-        self.root.after(100, self._finish_switch)
+            self.last_width = 0
+            self.last_height = 0
+            self.root.after(100, self._finish_switch)
 
     def _finish_switch(self):
         self._switching = False
         self._update_display(force=True)
 
-    # ---------- 顶部栏显示/隐藏 ----------
-    def on_mouse_move(self, event):
-        threshold = 50
-        if event.y <= threshold:
-            if not self.top_visible:
-                self.show_top_bar()
-        else:
-            if self.top_visible:
-                self.schedule_hide_top_bar()
-
-    def show_top_bar(self):
-        if self.top_visible:
+    # ---------- 窗口缩放防抖（强制刷新） ----------
+    def on_resize(self, event):
+        if self._switching:
             return
-        self.top_bar.place(x=0, y=0, relwidth=1.0)
-        self.top_bar.lift()  # 确保浮在所有控件之上
-        self.top_visible = True
+        if not self.selected_images:
+            return
+        if self.resize_job:
+            self.root.after_cancel(self.resize_job)
+        self.resize_job = self.root.after(80, lambda: self._update_display(force=True))
+
+    # ---------- 鼠标悬停显示控制栏 ----------
+    def on_mouse_move(self, event):
+        threshold = 60
+        if event.y <= threshold:
+            if not self.control_visible:
+                self.show_control()
+        else:
+            if self.control_visible:
+                self.schedule_hide_control()
+
+    def show_control(self):
+        if self.control_visible:
+            return
+        self.control_frame.place(x=0, y=0, relwidth=1.0)
+        self.control_frame.lift()
+        self.control_visible = True
         if self.auto_hide_timer:
             self.root.after_cancel(self.auto_hide_timer)
             self.auto_hide_timer = None
 
-    def schedule_hide_top_bar(self):
+    def schedule_hide_control(self):
         if self.auto_hide_timer:
             self.root.after_cancel(self.auto_hide_timer)
-        self.auto_hide_timer = self.root.after(500, self.hide_top_bar)
+        self.auto_hide_timer = self.root.after(80, self.hide_control)
 
-    def hide_top_bar(self):
-        if self.top_visible:
-            self.top_bar.place_forget()
-            self.top_visible = False
+    def hide_control(self):
+        if self.control_visible:
+            self.control_frame.place_forget()
+            self.control_visible = False
             self.auto_hide_timer = None
 
-    # ---------- 处理拖拽到exe ----------
+    # ---------- 处理命令行 ----------
     def process_command_line(self):
         if len(sys.argv) > 1:
             first_arg = sys.argv[1]
             if os.path.isdir(first_arg):
-                # 直接加载文件夹
                 self.load_folder(first_arg)
             elif os.path.isfile(first_arg) and first_arg.lower().endswith(('.jpg','.jpeg','.png','.bmp','.gif','.tiff','.webp')):
-                # 单个图片：加载其所在文件夹，并以该图片为起点
                 folder = os.path.dirname(first_arg)
                 self.load_folder(folder, start_image=first_arg)
 
@@ -413,21 +351,26 @@ class ImageBrowser:
             self.status_label.config(text=f"图片不足 {self.cols} 张")
             return
         self.image_paths.sort()
-        self._build_batches()
-        # 确定起始批次索引
+        
+        # ----- 以 start_image 为基准循环移位 -----
         if start_image:
-            # 使用 os.path.samefile 进行路径比较（忽略大小写和斜杠差异）
             start_abs = os.path.abspath(start_image)
             try:
-                # 在 self.image_paths 中查找匹配的路径
+                # 查找 start_image 在排序后列表中的索引
                 idx = next(i for i, p in enumerate(self.image_paths) if os.path.samefile(p, start_abs))
-                self.batch_index = idx // self.cols
+                # 循环移位：将 idx 之前的部分移到末尾
+                self.image_paths = self.image_paths[idx:] + self.image_paths[:idx]
+                # 因为列表已重排，第一批的第一张就是 start_image
+                self.batch_index = 0
             except (StopIteration, OSError):
-                # 如果匹配失败，从第一批开始
+                # 若未找到，则从第一批开始
                 self.batch_index = 0
         else:
             self.batch_index = 0
-        # 强制设为顺序模式（文件夹按顺序排列）
+
+    
+        self._build_batches()
+        # 强制设为顺序模式
         self.mode = "sequential"
         self.mode_var.set("sequential")
         self._apply_mode()
@@ -441,22 +384,15 @@ class ImageBrowser:
             return
         paths = re.findall(r'\{[^}]*\}|"[^"]*"|\S+', raw)
         paths = [p.strip('{}"') for p in paths]
-    
-        # 检查是否有文件夹
         folders = [p for p in paths if os.path.isdir(p)]
         if folders:
             self.load_folder(folders[0])
             return
-    
-        # 收集所有图片文件
         images = [p for p in paths if os.path.isfile(p) and p.lower().endswith(('.jpg','.jpeg','.png','.bmp','.gif','.tiff','.webp'))]
-        if not images:
-            return
-    
-        # 只取第一张图片，加载其所在文件夹，并以该图片为起点
-        first_image = images[0]
-        folder = os.path.dirname(first_image)
-        self.load_folder(folder, start_image=first_image)
+        if images:
+            first_image = images[0]
+            folder = os.path.dirname(first_image)
+            self.load_folder(folder, start_image=first_image)
 
     # ---------- 选择文件夹 ----------
     def select_folder(self):
@@ -611,15 +547,70 @@ class ImageBrowser:
         self.image_label.config(image=self.photo_image)
         self.image_label.image = self.photo_image
 
-    # ---------- 窗口缩放防抖 ----------
-    def on_resize(self, event):
-        if self._switching:
-            return
+
+    def save_current_image(self, event=None):
+        """保存当前批次图片的原始拼接图（高度统一），静默保存"""
         if not self.selected_images:
-            return
-        if self.resize_job:
-            self.root.after_cancel(self.resize_job)
-        self.resize_job = self.root.after(80, lambda: self._update_display(force=False))
+            return "break"
+    
+        # 确定保存目录（若全局路径为空，则使用默认路径）
+        save_dir = self.save_dir
+        if not save_dir:
+            # 默认保存在“用户图片”目录下的 SavedBatches 子文件夹
+            save_dir = os.path.join(os.path.expanduser("~"), "Pictures", "SavedBatches")
+    
+        # 确保目录存在，不存在则创建
+        if not os.path.exists(save_dir):
+            try:
+                os.makedirs(save_dir)
+            except Exception:
+                # 创建失败则静默退出
+                return "break"
+    
+        try:
+            import time
+            from PIL import Image
+    
+            # 1. 加载当前批次所有图片（原始尺寸）
+            imgs = []
+            for path in self.selected_images:
+                img = Image.open(path)
+                if img.mode == 'RGBA':
+                    img = img.convert('RGB')
+                imgs.append(img)
+    
+            # 2. 计算目标高度（最高者）
+            max_h = max(img.height for img in imgs)
+    
+            # 3. 等比缩放到统一高度
+            resized = []
+            for img in imgs:
+                ratio = max_h / img.height
+                new_w = int(img.width * ratio)
+                resized_img = img.resize((new_w, max_h), Image.LANCZOS)
+                resized.append(resized_img)
+    
+            # 4. 拼接
+            total_w = sum(img.width for img in resized)
+            combined = Image.new('RGB', (total_w, max_h), color=(0, 0, 0))
+            x = 0
+            for img in resized:
+                combined.paste(img, (x, 0))
+                x += img.width
+    
+            # 5. 保存
+            timestamp = time.strftime("%Y%m%d_%H%M%S")
+            filename = f"拼接_{timestamp}.jpg"
+            save_path = os.path.join(save_dir, filename)
+            combined.save(save_path, "JPEG", quality=90)
+    
+        except Exception:
+            # 静默失败（可取消注释下一行调试）
+            # import traceback; traceback.print_exc()
+            pass
+    
+        return "break"
+
 
     # ---------- 键盘快捷键 ----------
     def on_key_press(self, event):
