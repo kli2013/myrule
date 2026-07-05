@@ -818,6 +818,15 @@ class App:
         self.quality_var = tk.StringVar(value="85")
         self.quality_entry = tk.Entry(self.quality_frame, textvariable=self.quality_var, width=5)
         self.quality_entry.pack(side=tk.LEFT, padx=2)
+        # ---- 在 quality_entry 之后添加 ----
+        self.webp_lossless_var = tk.BooleanVar(value=False)
+        self.webp_lossless_cb = tk.Checkbutton(
+            format_frame, text="无损", variable=self.webp_lossless_var,
+            command=self._on_lossless_toggle
+        )
+        # 默认隐藏，仅 WEBP 时显示
+        self.webp_lossless_cb.pack(side=tk.LEFT, padx=2)
+        self.webp_lossless_cb.pack_forget()
         self.hint_label = tk.Label(self.quality_frame, text="(JPEG:1-100, PNG:0-9)", fg="gray")
         self.hint_label.pack(side=tk.LEFT, padx=10)
         
@@ -908,8 +917,18 @@ class App:
         self.batch_cancel_flag = False  # 批量切割取消标志
 
         self.on_mode_changed()
+        self.on_format_change()
         self.update_dir_frame_visibility()
         master.protocol("WM_DELETE_WINDOW", self.quit_app)
+
+
+    def _on_lossless_toggle(self):
+        """WebP 无损复选框勾选时，禁用/启用质量输入框"""
+        if self.webp_lossless_var.get():
+            self.quality_entry.config(state=tk.DISABLED)
+        else:
+            self.quality_entry.config(state=tk.NORMAL)
+
 
     # ---------- 单张切割取消相关 ----------
     def request_cancel(self):
@@ -945,6 +964,7 @@ class App:
             "direction": self.direction.get(),
             "format": self.format_var.get(),
             "quality": self.quality_var.get(),
+            "webp_lossless": self.webp_lossless_var.get(),
         }
         if mode == "grid":
             template["rows"] = self.rows_entry.get()
@@ -1171,6 +1191,10 @@ class App:
         target_mode = config.get('mode')
         if target_mode and img.mode != target_mode:
             img = img.convert(target_mode)
+
+        if fmt == "WEBP" and template.get('webp_lossless', False):
+            save_params['lossless'] = True
+            save_params['quality'] = 100
 
         # ---------- 执行切割（所有模式均传入 prefix） ----------
         if mode == "grid":
@@ -1684,7 +1708,7 @@ class App:
         q_range = config.get('quality_range')
         default_q = config.get('default_quality')
     
-        # ---- 切换显示：ICO 时隐藏质量框，显示尺寸按钮 ----
+        # 处理 ICO 显示切换
         if fmt == "ICO":
             self.quality_frame.pack_forget()
             self.ico_size_btn.pack(side=tk.LEFT, padx=5)
@@ -1692,17 +1716,31 @@ class App:
             self.ico_size_btn.pack_forget()
             self.quality_frame.pack(side=tk.LEFT, padx=5)
     
-        # ----- 根据格式设置标签文本 -----
+        # 设置标签文本
         if fmt == "PNG":
             self.quality_label.config(text="压缩:")
         else:
             self.quality_label.config(text="质量:")
     
-        # ---- 设置质量/压缩默认值（强制重置） ----
+        # ---- 处理 WebP 无损复选框 ----
+        if fmt == "WEBP":
+            # 显示复选框（如果尚未显示）
+            self.webp_lossless_cb.pack(side=tk.LEFT, padx=2)   # 确保在输入框和提示之间
+            # 根据勾选状态禁用/启用输入框
+            if self.webp_lossless_var.get():
+                self.quality_entry.config(state=tk.DISABLED)
+            else:
+                self.quality_entry.config(state=tk.NORMAL)
+        else:
+            # 隐藏复选框
+            self.webp_lossless_cb.pack_forget()
+            # 确保输入框启用
+            self.quality_entry.config(state=tk.NORMAL)
+    
+        # 设置质量提示和默认值
         if q_range is not None:
             min_q, max_q = q_range
             self.hint_label.config(text=f"({fmt}: {min_q}-{max_q})")
-            # 强制设为默认值（如果定义了），否则设为最小值
             if default_q is not None:
                 new_val = default_q
             else:
@@ -1711,6 +1749,12 @@ class App:
         else:
             self.hint_label.config(text="(此格式忽略质量参数)")
             pass
+
+    def _on_lossless_toggle(self):
+        if self.webp_lossless_var.get():
+            self.quality_entry.config(state=tk.DISABLED)
+        else:
+            self.quality_entry.config(state=tk.NORMAL)
 
     def edit_ico_sizes(self):
         """弹出对话框编辑 ICO 尺寸列表"""
@@ -1807,6 +1851,10 @@ class App:
                     save_params[key] = param_name
         else:
             save_params.update(config['save_params'])
+        # ---- 处理 WebP 无损 ----
+        if fmt == "WEBP" and self.webp_lossless_var.get():
+            save_params['lossless'] = True
+            save_params['quality'] = 100   # 强制最大 effort
         if fmt == "ICO":
             save_params['sizes'] = self.ico_sizes
         save_params['format'] = fmt
