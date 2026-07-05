@@ -239,7 +239,9 @@ class TemplateEditor(ttk.Frame):
         # 第一行：格式、质量、旋转、翻转
         row1 = ttk.Frame(self)
         row1.pack(fill=tk.X, pady=2)
-        ttk.Label(row1, text="格式:").pack(side=tk.LEFT, padx=2)
+        lbl_format = ttk.Label(row1, text="格式:")
+        lbl_format.pack(side=tk.LEFT, padx=2)
+        ToolTip(lbl_format, "WEBP 格式下，质量值设为 101 可触发无损模式")
         self.format_var = tk.StringVar(value="JPEG")
         format_combo = ttk.Combobox(row1, textvariable=self.format_var,
                                     values=["保持原格式", "JPEG", "PNG", "WEBP", "BMP", "ICO"],
@@ -254,14 +256,7 @@ class TemplateEditor(ttk.Frame):
         self.quality_label.pack(side=tk.LEFT, padx=(10,2))
 
 
-        # 新增：WebP 无损复选框
-        self.webp_lossless_var = tk.BooleanVar(value=False)
-        self.webp_lossless_cb = ttk.Checkbutton(
-            self.quality_frame, text="无损", variable=self.webp_lossless_var,
-            command=self._on_lossless_toggle
-        )
-        self.webp_lossless_cb.pack(side=tk.LEFT, padx=2)
-        self.webp_lossless_cb.pack_forget()   # 默认隐藏
+
         
         self.quality_var = tk.IntVar(value=85)   # 原有，无需改动
         self.quality_scale = ttk.Scale(self.quality_frame, from_=1, to=100, variable=self.quality_var,
@@ -515,14 +510,18 @@ class TemplateEditor(ttk.Frame):
 
 
 
-    def _on_lossless_toggle(self):
-        """WebP 无损复选框勾选时，禁用/启用质量滑块和数值框"""
-        if self.webp_lossless_var.get():
-            self.quality_scale.config(state=tk.DISABLED)
-            self.quality_spin.config(state=tk.DISABLED)
+    def _on_quality_changed(self, *args):
+        """当质量值变化时，检测是否为101，切换无损模式"""
+        try:
+            val = int(self.quality_var.get())
+        except (ValueError, TypeError):
+            return
+        if val == 101:
+
+            self.quality_label.config(text="无损:")
         else:
-            self.quality_scale.config(state=tk.NORMAL)
-            self.quality_spin.config(state=tk.NORMAL)
+
+            self.quality_label.config(text="质量:")
 
     def _on_format_changed(self, *args):
         fmt = self.format_var.get()
@@ -532,64 +531,57 @@ class TemplateEditor(ttk.Frame):
             self.quality_label.pack_forget()
             self.quality_scale.pack_forget()
             self.quality_spin.pack_forget()
-            self.webp_lossless_cb.pack_forget()   # 确保隐藏
             self.ico_size_btn.pack(side=tk.LEFT, padx=2)
-        else:
-            self.ico_size_btn.pack_forget()
-            # 先确保质量控件显示（若之前被隐藏）
-            self.quality_label.pack(side=tk.LEFT, padx=(10,2))
-            self.quality_scale.pack(side=tk.LEFT, padx=2)
-            self.quality_spin.pack(side=tk.LEFT, padx=2)
-            
-            # ---- 处理 WEBP 无损复选框 ----
-            if fmt == "WEBP":
-                # 显示复选框（在质量标签和滑块之间）
-                self.webp_lossless_cb.pack(side=tk.LEFT, padx=2)
-                # 缩短滑块长度（例如 80→50），为复选框腾出空间
-                self.quality_scale.config(length=43)
-                self.quality_spin.config(width=3)
-                # 根据当前复选框状态设置滑块/数值框是否启用
-                self._on_lossless_toggle()   # 会调用一次，更新状态
-            else:
-                # 隐藏复选框
-                self.webp_lossless_cb.pack_forget()
-                # 恢复滑块长度为默认（例如 80）
-                self.quality_scale.config(length=80)
-                self.quality_spin.config(width=5)
-                # 确保滑块和数值框启用（以防之前被禁用）
-                self.quality_scale.config(state=tk.NORMAL)
-                self.quality_spin.config(state=tk.NORMAL)
-        
-        # ---- 获取当前格式配置，调整标签和默认值 ----
-        config = FORMAT_CONFIG.get(fmt, {})
-        q_range = config.get('quality_range')
-        
-        # ---- 调整滑块范围和标签文本（始终执行） ----
-        if fmt == "PNG":
+            self._on_settings_changed()
+            return   # ICO 不需要后续处理
+    
+        # ---- 非 ICO：确保质量控件可见 ----
+        self.ico_size_btn.pack_forget()
+        self.quality_label.pack(side=tk.LEFT, padx=(10,2))
+        self.quality_scale.pack(side=tk.LEFT, padx=2)
+        self.quality_spin.pack(side=tk.LEFT, padx=2)
+    
+        # ---- 根据格式设置滑块范围、标签、Spinbox范围 ----
+        if fmt == "WEBP":
+            self.quality_label.config(text="质量:")
+            self.quality_scale.config(from_=1, to=101)
+            self.quality_spin.config(from_=1, to=101)
+            # 调用 _on_quality_changed 更新滑块状态和标签（处理101）
+            self._on_quality_changed()
+        elif fmt == "PNG":
             self.quality_label.config(text="压缩:")
-            self.quality_scale.config(from_=9, to=0)
+            self.quality_scale.config(from_=9, to=0)   # 反向滑块
             self.quality_spin.config(from_=0, to=9)
+            self.quality_scale.config(state=tk.NORMAL)  # 确保启用
         else:
-            # 对于 WEBP，如果勾选了无损，质量滑块仍显示 1-100，但实际保存时会设为无损
-            # 但滑块值仍然可以调整（用于无损模式下的 effort）
+            # JPEG, BMP, 其他（不含ICO）
             self.quality_label.config(text="质量:")
             self.quality_scale.config(from_=1, to=100)
             self.quality_spin.config(from_=1, to=100)
-        
-        # ---- 如果是加载预设，跳过设置默认值 ----
+            self.quality_scale.config(state=tk.NORMAL)
+    
+        # ---- 设置默认值（防止保留无效的101） ----
+        config = FORMAT_CONFIG.get(fmt, {})
+        q_range = config.get('quality_range')
+        default_q = config.get('default_quality')
+    
+        # 仅当格式不是 WEBP 或当前值不是 101 时才重置默认值
+        if fmt != "WEBP" or self.quality_var.get() != 101:
+            if q_range is not None:
+                if default_q is not None:
+                    new_val = default_q
+                else:
+                    new_val = q_range[0]
+                self.quality_var.set(new_val)
+            # 如果格式无质量参数（如 BMP），可保留原值
+        # 如果是 WEBP 且值为 101，则保留不动（由 _on_quality_changed 处理禁用）
+    
+        # ---- 加载预设时跳过后续 ----
         if getattr(self, '_loading_preset', False):
             self._on_settings_changed()
             return
-        
-        # ---- 用户手动切换时，设置默认值 ----
-        default_q = config.get('default_quality')
-        if q_range is not None:
-            if default_q is not None:
-                new_val = default_q
-            else:
-                new_val = q_range[0]
-            self.quality_var.set(new_val)
-        
+    
+        # ---- 用户手动切换：上述默认值设置已处理，无需额外操作 ----
         self._on_settings_changed()
 
     def _edit_ico_sizes(self):
@@ -714,6 +706,7 @@ class TemplateEditor(ttk.Frame):
         ]
         vars_list.extend(watermark_vars)
 
+        self.quality_var.trace_add('write', self._on_quality_changed)
 
         for var in vars_list:
             var.trace_add('write', lambda *a: self._on_settings_changed())
@@ -737,6 +730,7 @@ class TemplateEditor(ttk.Frame):
         self.color_enable.trace_add('write', lambda *a: self._update_enhance_enable())
         self.saturation_enable.trace_add('write', lambda *a: self._update_enhance_enable())
         self.sharpen_enable.trace_add('write', lambda *a: self._update_enhance_enable())
+
         
 
     def _init_enhance_state(self):
@@ -821,7 +815,7 @@ class TemplateEditor(ttk.Frame):
         }
         # 保存颜色：将颜色名称转换为十六进制存储
         settings['watermark_color'] = self.watermark_color_var.get()
-        settings['webp_lossless'] = self.webp_lossless_var.get()
+
     
         if self.include_exif_date_delete:
             settings.update({
@@ -879,7 +873,7 @@ class TemplateEditor(ttk.Frame):
             if ico_sizes and isinstance(ico_sizes, list):
                 self._ico_sizes = [tuple(s) for s in ico_sizes if isinstance(s, (tuple, list)) and len(s)==2]
             
-            self.webp_lossless_var.set(settings.get('webp_lossless', False))
+
             # 强制更新显示状态，但此时 _loading_preset 为 True，会跳过默认值设置
             self._on_format_changed()
             self._on_resize_mode_changed()
@@ -3083,10 +3077,14 @@ class ImageConverter(TkinterDnD.Tk):
                     actual_fmt = fmt
                     original_path_for_config = None
                 save_params = self._prepare_save_params(fmt, qual, original_path_for_config)
-                # 如果格式为 WEBP 且任务中启用了无损
-                if fmt == "WEBP" and task.get('webp_lossless', False):
+                # 如果格式为 WEBP 且质量101
+                if fmt == "WEBP" and qual == 101:
+                    # 使用无损模式
+                    save_params = self._prepare_save_params(fmt, 100, original_path_for_config)  # 传入100避免钳制
                     save_params['lossless'] = True
-                    save_params['quality'] = 100  # 采用业界标准
+                    save_params['quality'] = 100
+                else:
+                    save_params = self._prepare_save_params(fmt, qual, original_path_for_config)
                 target_mode = self._get_output_mode(img, fmt, original_path_for_config)
                 if target_mode:
                     img = img.convert(target_mode)
