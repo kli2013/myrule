@@ -818,15 +818,9 @@ class App:
         self.quality_var = tk.StringVar(value="85")
         self.quality_entry = tk.Entry(self.quality_frame, textvariable=self.quality_var, width=5)
         self.quality_entry.pack(side=tk.LEFT, padx=2)
-        # ---- 在 quality_entry 之后添加 ----
-        self.webp_lossless_var = tk.BooleanVar(value=False)
-        self.webp_lossless_cb = tk.Checkbutton(
-            format_frame, text="无损", variable=self.webp_lossless_var,
-            command=self._on_lossless_toggle
-        )
-        # 默认隐藏，仅 WEBP 时显示
-        self.webp_lossless_cb.pack(side=tk.LEFT, padx=2)
-        self.webp_lossless_cb.pack_forget()
+
+
+
         self.hint_label = tk.Label(self.quality_frame, text="(JPEG:1-100, PNG:0-9)", fg="gray")
         self.hint_label.pack(side=tk.LEFT, padx=10)
         
@@ -918,17 +912,27 @@ class App:
 
         self.on_mode_changed()
         self.on_format_change()
+        
+        self.quality_var.trace_add('write', self._on_quality_changed)
+        
         self.update_dir_frame_visibility()
         master.protocol("WM_DELETE_WINDOW", self.quit_app)
 
 
-    def _on_lossless_toggle(self):
-        """WebP 无损复选框勾选时，禁用/启用质量输入框"""
-        if self.webp_lossless_var.get():
-            self.quality_entry.config(state=tk.DISABLED)
+    def _on_quality_changed(self, *args):
+        """当质量值变化时，检测是否为101，切换无损模式（仅WEBP）"""
+        fmt = self.format_var.get()
+        # 如果不是 WEBP，则不处理（标签由 on_format_change 控制）
+        if fmt != "WEBP":
+            return
+        try:
+            val = int(self.quality_var.get())
+        except (ValueError, TypeError):
+            return
+        if val == 101:
+            self.quality_label.config(text="无损:")
         else:
-            self.quality_entry.config(state=tk.NORMAL)
-
+            self.quality_label.config(text="质量:")
 
     # ---------- 单张切割取消相关 ----------
     def request_cancel(self):
@@ -964,7 +968,6 @@ class App:
             "direction": self.direction.get(),
             "format": self.format_var.get(),
             "quality": self.quality_var.get(),
-            "webp_lossless": self.webp_lossless_var.get(),
         }
         if mode == "grid":
             template["rows"] = self.rows_entry.get()
@@ -1188,13 +1191,17 @@ class App:
                 save_params[key] = val
         if fmt == "ICO":
             save_params['sizes'] = self.ico_sizes
+
+
+        if fmt == "WEBP" and int(self.quality_var.get()) == 101:
+            save_params['lossless'] = True
+            save_params['quality'] = 100
+
         target_mode = config.get('mode')
         if target_mode and img.mode != target_mode:
             img = img.convert(target_mode)
 
-        if fmt == "WEBP" and template.get('webp_lossless', False):
-            save_params['lossless'] = True
-            save_params['quality'] = 100
+
 
         # ---------- 执行切割（所有模式均传入 prefix） ----------
         if mode == "grid":
@@ -1722,33 +1729,31 @@ class App:
         else:
             self.quality_label.config(text="质量:")
     
-        # ---- 处理 WebP 无损复选框 ----
+        # 设置质量提示
         if fmt == "WEBP":
-            # 显示复选框（如果尚未显示）
-            self.webp_lossless_cb.pack(side=tk.LEFT, padx=2)   # 确保在输入框和提示之间
-            # 根据勾选状态禁用/启用输入框
-            if self.webp_lossless_var.get():
-                self.quality_entry.config(state=tk.DISABLED)
-            else:
-                self.quality_entry.config(state=tk.NORMAL)
+            self.hint_label.config(text="(WEBP: 1-100, 101=无损)")
         else:
-            # 隐藏复选框
-            self.webp_lossless_cb.pack_forget()
-            # 确保输入框启用
-            self.quality_entry.config(state=tk.NORMAL)
+            if q_range is not None:
+                min_q, max_q = q_range
+                self.hint_label.config(text=f"({fmt}: {min_q}-{max_q})")
+            else:
+                self.hint_label.config(text="(此格式忽略质量参数)")
     
-        # 设置质量提示和默认值
+        # 设置默认值（仅当非WEBP或当前值不是101时重置）
         if q_range is not None:
-            min_q, max_q = q_range
-            self.hint_label.config(text=f"({fmt}: {min_q}-{max_q})")
-            if default_q is not None:
-                new_val = default_q
+            # 如果当前是 WEBP 且值为 101，保留
+            if fmt == "WEBP" and self.quality_var.get() == "101":
+                pass
             else:
-                new_val = min_q
-            self.quality_var.set(str(new_val))
-        else:
-            self.hint_label.config(text="(此格式忽略质量参数)")
-            pass
+                if default_q is not None:
+                    new_val = default_q
+                else:
+                    new_val = q_range[0]
+                self.quality_var.set(str(new_val))
+        # 对于无质量参数的格式（如 BMP），保留原值
+    
+        # 调用 _on_quality_changed 更新输入框状态和标签（针对 WEBP 101 状态）
+        self._on_quality_changed()
 
     def _on_lossless_toggle(self):
         if self.webp_lossless_var.get():
@@ -1852,9 +1857,9 @@ class App:
         else:
             save_params.update(config['save_params'])
         # ---- 处理 WebP 无损 ----
-        if fmt == "WEBP" and self.webp_lossless_var.get():
+        if fmt == "WEBP" and int(quality) == 101:
             save_params['lossless'] = True
-            save_params['quality'] = 100   # 强制最大 effort
+            save_params['quality'] = 100
         if fmt == "ICO":
             save_params['sizes'] = self.ico_sizes
         save_params['format'] = fmt
