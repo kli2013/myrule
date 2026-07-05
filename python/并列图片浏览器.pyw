@@ -5,6 +5,7 @@ import tkinter as tk
 from tkinter import filedialog, messagebox, ttk
 from PIL import Image, ImageTk
 import re
+import json
 
 try:
     from tkinterdnd2 import TkinterDnD, DND_FILES
@@ -16,7 +17,68 @@ except ImportError:
             pass
     DND_FILES = None
 
-SAVE_DIR = r"D:\123"   # 请替换为您自己的目录
+
+def get_save_dir():
+    """
+    获取保存目录，优先级：
+    1. 命令行参数 --save-dir
+    2. 环境变量 IMAGE_BROWSER_SAVE_DIR
+    3. 配置文件 ImageBrowser.json 中的 "save_dir" 字段
+    4. 默认路径：用户图片目录/SavedBatches
+    同时，若配置文件不存在，自动创建默认配置。
+    """
+    # 1. 命令行参数
+    for i, arg in enumerate(sys.argv):
+        if arg == "--save-dir" and i + 1 < len(sys.argv):
+            return sys.argv[i + 1]
+
+    # 2. 环境变量
+    env_dir = os.environ.get("IMAGE_BROWSER_SAVE_DIR")
+    if env_dir:
+        return env_dir
+
+    # 3. 配置文件
+    # 确定程序所在目录（打包后为 exe 目录，否则为脚本目录）
+    if getattr(sys, 'frozen', False):
+        base_dir = os.path.dirname(sys.executable)
+    else:
+        base_dir = os.path.dirname(os.path.abspath(__file__))
+    config_path = os.path.join(base_dir, "ImageBrowser.json")
+
+    default_save_dir = os.path.join(os.path.expanduser("~"), "Pictures", "SavedBatches")
+    default_config = {"save_dir": default_save_dir}
+
+    # 确保配置文件存在，若不存在则创建默认配置
+    if not os.path.exists(config_path):
+        try:
+            with open(config_path, 'w', encoding='utf-8') as f:
+                json.dump(default_config, f, indent=2, ensure_ascii=False)
+        except Exception:
+            # 若无法写入（如权限不足），则忽略，继续使用默认路径
+            return default_save_dir
+
+    # 读取配置文件
+    try:
+        with open(config_path, 'r', encoding='utf-8') as f:
+            config = json.load(f)
+            save_dir = config.get("save_dir", default_save_dir)
+            if save_dir:
+                return save_dir
+            else:
+                # 如果 save_dir 为空字符串，使用默认值，并修正配置文件
+                config["save_dir"] = default_save_dir
+                with open(config_path, 'w', encoding='utf-8') as f:
+                    json.dump(config, f, indent=2, ensure_ascii=False)
+                return default_save_dir
+    except (json.JSONDecodeError, KeyError):
+        # 配置文件损坏，覆盖写入默认配置
+        try:
+            with open(config_path, 'w', encoding='utf-8') as f:
+                json.dump(default_config, f, indent=2, ensure_ascii=False)
+        except:
+            pass
+        return default_save_dir
+
 
 class ImageBrowser:
     def __init__(self, root):
@@ -30,7 +92,7 @@ class ImageBrowser:
         self.normal_geometry = None   # 保存普通窗口几何（含位置）
         self.was_maximized = False    # 进入全屏前是否最大化
         
-        self.save_dir = SAVE_DIR   # 读取全局路径
+        self.save_dir = get_save_dir()   # 读取路径
         self.root.bind("<Alt-Key-s>", self.save_current_image)   # 绑定快捷键
 
         # ---------- 数据 ----------
@@ -367,10 +429,9 @@ class ImageBrowser:
                 self.batch_index = 0
         else:
             self.batch_index = 0
-
-    
+   
         self._build_batches()
-        # 强制设为顺序模式
+
         self.mode = "sequential"
         self.mode_var.set("sequential")
         self._apply_mode()
