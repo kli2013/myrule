@@ -184,6 +184,7 @@ class ToolTip:
         widget.bind('<Enter>', self.show_tip)
         widget.bind('<Leave>', self.hide_tip)
 
+
     def show_tip(self, event=None):
         if self.tip_window:
             self.hide_tip()
@@ -227,11 +228,26 @@ class TemplateEditor(ttk.Frame):
         self.default_expanded = default_expanded
         self.preview_callback = None
         self.visual_crop_callback = None
+
+        # 水印相关变量（必须全部定义）
+        self.watermark_enable = tk.BooleanVar(value=False)
+        self.watermark_text_var = tk.StringVar(value="Watermark")
+        self.watermark_font_var = tk.StringVar(value="Arial")
+        self.watermark_size_var = tk.IntVar(value=36)
+        self.watermark_pos_var = tk.StringVar(value="右下")          # ← 缺失的这一行
+        self.watermark_opacity_var = tk.IntVar(value=80)
+        self.watermark_color_var = tk.StringVar(value="#FFFFFF")
+        self.watermark_angle_var = tk.IntVar(value=0)               # 新增旋转
+        self.watermark_tile_var = tk.BooleanVar(value=False)        # 新增平铺
+        self.watermark_gap_x_var = tk.IntVar(value=50)   # 水平间距（像素）
+        self.watermark_gap_y_var = tk.IntVar(value=50)   # 垂直间距（像素）
+
         self._create_widgets()
         self._setup_traces()
         self._ico_sizes = [(16,16), (32,32), (48,48), (64,64), (128,128), (256,256)]
         self._loading_preset = False
         self._init_enhance_state()
+
         if self.default_expanded:
             self._toggle_enhance()
 
@@ -242,7 +258,7 @@ class TemplateEditor(ttk.Frame):
         lbl_format = ttk.Label(row1, text="格式:")
         lbl_format.pack(side=tk.LEFT, padx=2)
         ToolTip(lbl_format, "WEBP 格式下，质量值设为 101 可触发无损模式")
-        self.format_var = tk.StringVar(value="JPEG")
+        self.format_var = tk.StringVar(value="WEBP")
         format_combo = ttk.Combobox(row1, textvariable=self.format_var,
                                     values=["保持原格式", "JPEG", "PNG", "WEBP", "BMP", "ICO"],
                                     state="readonly", width=10)
@@ -258,12 +274,12 @@ class TemplateEditor(ttk.Frame):
 
 
         
-        self.quality_var = tk.IntVar(value=85)   # 原有，无需改动
-        self.quality_scale = ttk.Scale(self.quality_frame, from_=1, to=100, variable=self.quality_var,
+        self.quality_var = tk.IntVar(value=80)   # 原有，无需改动
+        self.quality_scale = ttk.Scale(self.quality_frame, from_=1, to=101, variable=self.quality_var,
                                        orient=tk.HORIZONTAL, length=80)
         self.quality_scale.pack(side=tk.LEFT, padx=2)
         
-        self.quality_spin = ttk.Spinbox(self.quality_frame, from_=1, to=100, textvariable=self.quality_var,
+        self.quality_spin = ttk.Spinbox(self.quality_frame, from_=1, to=101, textvariable=self.quality_var,
                                         width=5, state='normal')
         self.quality_spin.pack(side=tk.LEFT, padx=2)
         
@@ -485,103 +501,126 @@ class TemplateEditor(ttk.Frame):
         self.watermark_opacity_label = ttk.Label(wm_row1, text="80%", width=4)
         self.watermark_opacity_label.pack(side=tk.LEFT, padx=2)
 
-        # 第二行：位置按钮（平铺）
+
+        # 颜色标签
+        ttk.Label(wm_row1, text="颜色:").pack(side=tk.LEFT, padx=(5,2))
+        # 选择颜色按钮
+        self.choose_color_btn = ttk.Button(wm_row1, text="选择颜色", command=self.choose_color, width=8)
+        self.choose_color_btn.pack(side=tk.LEFT, padx=2)
+        # 颜色预览
+        self.color_preview = tk.Canvas(wm_row1, width=20, height=20, bg="#FFFFFF", bd=1, relief=tk.SUNKEN)
+        self.color_preview.pack(side=tk.LEFT, padx=2)
+        
+
+        # 第二行：位置按钮 + 颜色 + 旋转 + 平铺（顺序排列）
         wm_row2 = ttk.Frame(self.watermark_frame)
         wm_row2.pack(fill=tk.X, pady=2, padx=5)
-
-        self.watermark_pos_var = tk.StringVar(value="右下")
+        
+        # 位置按钮（9个）
         positions = ["左上", "上", "右上", "左中", "中", "右中", "左下", "下", "右下"]
-
         for pos in positions:
             btn = ttk.Button(wm_row2, text=pos, width=4,
                              command=lambda p=pos: self.watermark_pos_var.set(p))
             btn.pack(side=tk.LEFT, padx=2)
         
-        # 颜色选择：按钮 + 预览色块
-        ttk.Label(wm_row2, text="颜色:").pack(side=tk.LEFT, padx=(15,2))
-        self.watermark_color_var = tk.StringVar(value="#FFFFFF")
-        self.choose_color_btn = ttk.Button(wm_row2, text="选择颜色", command=self.choose_color, width=8)
-        self.choose_color_btn.pack(side=tk.LEFT, padx=2)
-        self.color_preview = tk.Canvas(wm_row2, width=20, height=20, bg="#FFFFFF", bd=1, relief=tk.SUNKEN)
-        self.color_preview.pack(side=tk.LEFT, padx=2)
 
+        
+        # 旋转标签
+        ttk.Label(wm_row2, text="旋转:").pack(side=tk.LEFT, padx=(2,2))
+        # 旋转 Spinbox（已绑定变量 self.watermark_angle_var）
+        angle_spin = ttk.Spinbox(wm_row2, from_=0, to=360, textvariable=self.watermark_angle_var, width=5)
+        angle_spin.pack(side=tk.LEFT, padx=2)
+        
+        # 平铺复选框
+        tile_check = ttk.Checkbutton(wm_row2, text="平铺", variable=self.watermark_tile_var)
+        tile_check.pack(side=tk.LEFT, padx=5)
+        # 水平间距
+        ttk.Label(wm_row2, text="水平间距:").pack(side=tk.LEFT, padx=(2,2))
+        gap_x_spin = ttk.Spinbox(wm_row2, from_=0, to=500, textvariable=self.watermark_gap_x_var, width=5)
+        gap_x_spin.pack(side=tk.LEFT, padx=2)
+        
+        # 垂直间距
+        ttk.Label(wm_row2, text="垂直间距:").pack(side=tk.LEFT, padx=(2,2))
+        gap_y_spin = ttk.Spinbox(wm_row2, from_=0, to=500, textvariable=self.watermark_gap_y_var, width=5)
+        gap_y_spin.pack(side=tk.LEFT, padx=2)
 
         self.format_var.trace_add('write', self._on_format_changed)
 
 
+    def _safe_get_int(self, var, default=0):
+        """安全地从 tk.IntVar 获取整数，若值为空或无效则返回默认值"""
+        try:
+            val = var.get()
+            if val == '':
+                return default
+            return int(val)
+        except (tk.TclError, ValueError):
+            return default
 
     def _on_quality_changed(self, *args):
-        """当质量值变化时，检测是否为101，切换无损模式"""
+        fmt = self.format_var.get()
+        if fmt != "WEBP":
+            return
         try:
             val = int(self.quality_var.get())
-        except (ValueError, TypeError):
+        except:
             return
         if val == 101:
-
             self.quality_label.config(text="无损:")
         else:
-
             self.quality_label.config(text="质量:")
 
     def _on_format_changed(self, *args):
         fmt = self.format_var.get()
-        
-        # ---- 处理 ICO 显示切换 ----
+    
+        # 处理 ICO
         if fmt == "ICO":
             self.quality_label.pack_forget()
             self.quality_scale.pack_forget()
             self.quality_spin.pack_forget()
             self.ico_size_btn.pack(side=tk.LEFT, padx=2)
             self._on_settings_changed()
-            return   # ICO 不需要后续处理
+            return
     
-        # ---- 非 ICO：确保质量控件可见 ----
         self.ico_size_btn.pack_forget()
         self.quality_label.pack(side=tk.LEFT, padx=(10,2))
         self.quality_scale.pack(side=tk.LEFT, padx=2)
         self.quality_spin.pack(side=tk.LEFT, padx=2)
     
-        # ---- 根据格式设置滑块范围、标签、Spinbox范围 ----
+        # 根据格式设置控件范围和基础标签
         if fmt == "WEBP":
             self.quality_label.config(text="质量:")
             self.quality_scale.config(from_=1, to=101)
             self.quality_spin.config(from_=1, to=101)
-            # 调用 _on_quality_changed 更新滑块状态和标签（处理101）
-            self._on_quality_changed()
+            self._on_quality_changed()  # 检查是否需要改为“无损:”
         elif fmt == "PNG":
-            self.quality_label.config(text="压缩:")
-            self.quality_scale.config(from_=9, to=0)   # 反向滑块
+            self.quality_label.config(text="压缩:")   # PNG 固定为“压缩:”
+            self.quality_scale.config(from_=9, to=0)
             self.quality_spin.config(from_=0, to=9)
-            self.quality_scale.config(state=tk.NORMAL)  # 确保启用
+            self.quality_scale.config(state=tk.NORMAL)
         else:
-            # JPEG, BMP, 其他（不含ICO）
             self.quality_label.config(text="质量:")
             self.quality_scale.config(from_=1, to=100)
             self.quality_spin.config(from_=1, to=100)
             self.quality_scale.config(state=tk.NORMAL)
     
-        # ---- 设置默认值（防止保留无效的101） ----
-        config = FORMAT_CONFIG.get(fmt, {})
-        q_range = config.get('quality_range')
-        default_q = config.get('default_quality')
-    
-        # 仅当格式不是 WEBP 或当前值不是 101 时才重置默认值
-        if fmt != "WEBP" or self.quality_var.get() != 101:
-            if q_range is not None:
-                if default_q is not None:
-                    new_val = default_q
-                else:
-                    new_val = q_range[0]
-                self.quality_var.set(new_val)
-            # 如果格式无质量参数（如 BMP），可保留原值
-        # 如果是 WEBP 且值为 101，则保留不动（由 _on_quality_changed 处理禁用）
-    
-        # ---- 加载预设时跳过后续 ----
+        # 加载预设时跳过默认值设置
         if getattr(self, '_loading_preset', False):
             self._on_settings_changed()
             return
     
-        # ---- 用户手动切换：上述默认值设置已处理，无需额外操作 ----
+        # 用户手动切换：设置默认值
+        config = FORMAT_CONFIG.get(fmt, {})
+        q_range = config.get('quality_range')
+        default_q = config.get('default_quality')
+        if q_range is not None:
+            # 如果是 WEBP 且当前值为 101，保留无损状态
+            if fmt == "WEBP" and self.quality_var.get() == 101:
+                pass
+            else:
+                new_val = default_q if default_q is not None else q_range[0]
+                self.quality_var.set(new_val)
+    
         self._on_settings_changed()
 
     def _edit_ico_sizes(self):
@@ -703,6 +742,10 @@ class TemplateEditor(ttk.Frame):
             self.watermark_pos_var,
             self.watermark_opacity_var,
             self.watermark_color_var,
+            self.watermark_angle_var,
+            self.watermark_tile_var,
+            self.watermark_gap_x_var,
+            self.watermark_gap_y_var,
         ]
         vars_list.extend(watermark_vars)
 
@@ -779,42 +822,54 @@ class TemplateEditor(ttk.Frame):
     def get_settings(self):
         settings = {
             'format': self.format_var.get(),
-            'quality': self.quality_var.get(),
+            'quality': self._safe_get_int(self.quality_var, 85),
             'rotation': self.rotation_var.get(),
             'h_flip': self.h_flip_var.get(),
             'v_flip': self.v_flip_var.get(),
             'resize_mode': self.resize_mode_var.get(),
-            'resize_w': self.resize_width_var.get(),
-            'resize_h': self.resize_height_var.get(),
+            'resize_w': self._safe_get_int(self.resize_width_var, 800),
+            'resize_h': self._safe_get_int(self.resize_height_var, 600),
             'crop_enabled': self.crop_enabled_var.get(),
-            'crop_x': self.crop_x_var.get(),
+            'crop_x': self.crop_x_var.get(),          # 字符串类型（表达式），保持原样
             'crop_y': self.crop_y_var.get(),
             'crop_w': self.crop_w_var.get(),
             'crop_h': self.crop_h_var.get(),
             'brightness_enable': self.brightness_enable.get(),
-            'brightness_val': self.brightness_var.get(),
+            'brightness_val': self._safe_get_int(self.brightness_var, 0),
             'contrast_enable': self.contrast_enable.get(),
-            'contrast_val': self.contrast_var.get(),
+            'contrast_val': self._safe_get_int(self.contrast_var, 0),
             'color_enable': self.color_enable.get(),
-            'r_gain': self.r_var.get(),
-            'g_gain': self.g_var.get(),
-            'b_gain': self.b_var.get(),
+            'r_gain': self._safe_get_int(self.r_var, 0),
+            'g_gain': self._safe_get_int(self.g_var, 0),
+            'b_gain': self._safe_get_int(self.b_var, 0),
             'saturation_enable': self.saturation_enable.get(),
-            'saturation_val': self.saturation_var.get(),
+            'saturation_val': self._safe_get_int(self.saturation_var, 0),
             'sharpen_enable': self.sharpen_enable.get(),
-            'sharpen_val': self.sharpen_var.get(),
+            'sharpen_val': self._safe_get_int(self.sharpen_var, 0),
             # 文字水印参数
             'watermark_enable': self.watermark_enable.get(),
             'watermark_text': self.watermark_text_var.get(),
             'watermark_font': self.watermark_font_var.get(),
-            'watermark_size': self.watermark_size_var.get(),
+            'watermark_size': self._safe_get_int(self.watermark_size_var, 36),
             'watermark_position': self.watermark_pos_var.get(),
-            'watermark_opacity': self.watermark_opacity_var.get(),
-            'preview_size': self.preview_size_var.get(),
+            'watermark_opacity': self._safe_get_int(self.watermark_opacity_var, 80),
+            'preview_size': self._safe_get_int(self.preview_size_var, 600),
             'ico_sizes': self._ico_sizes.copy(),
+            'watermark_angle': self._safe_get_int(self.watermark_angle_var, 0),
+            'watermark_tile': self.watermark_tile_var.get(),
+            'watermark_gap_x': self._safe_get_int(self.watermark_gap_x_var, 50),
+            'watermark_gap_y': self._safe_get_int(self.watermark_gap_y_var, 50),
         }
-        # 保存颜色：将颜色名称转换为十六进制存储
+        # 保存颜色（十六进制字符串）
         settings['watermark_color'] = self.watermark_color_var.get()
+    
+        if self.include_exif_date_delete:
+            settings.update({
+                'keep_exif': self.keep_exif_var.get(),
+                'preserve_original_date': self.preserve_date_var.get(),
+                'delete_original': self.delete_original_var.get(),
+            })
+        return settings
 
     
         if self.include_exif_date_delete:
@@ -861,6 +916,10 @@ class TemplateEditor(ttk.Frame):
             self.watermark_pos_var.set(settings.get('watermark_position', '右下'))
             self.watermark_opacity_var.set(settings.get('watermark_opacity', 80))
             self.preview_size_var.set(settings.get('preview_size', 600))
+            self.watermark_angle_var.set(settings.get('watermark_angle', 0))
+            self.watermark_tile_var.set(settings.get('watermark_tile', False))
+            self.watermark_gap_x_var.set(settings.get('watermark_gap_x', 50))
+            self.watermark_gap_y_var.set(settings.get('watermark_gap_y', 50))
             # 颜色加载
             self.watermark_color_var.set(settings.get('watermark_color', '#FFFFFF'))
             if hasattr(self, 'color_preview'):
@@ -1025,6 +1084,10 @@ class ImageConverter(TkinterDnD.Tk):
             'position': settings.get('watermark_position', '右下'),
             'opacity': settings.get('watermark_opacity', 80),
             'color': settings.get('watermark_color', '#FFFFFF'),
+            'angle': settings.get('watermark_angle', 0),
+            'tile': settings.get('watermark_tile', False),
+            'gap_x': settings.get('watermark_gap_x', 50),
+            'gap_y': settings.get('watermark_gap_y', 50),
         }
         img = self.draw_watermark(img, watermark_settings)
         return img
@@ -1398,60 +1461,115 @@ class ImageConverter(TkinterDnD.Tk):
 
     #-----水印----
     def draw_watermark(self, img, watermark_settings):
-        """在图像上绘制文字水印（支持字体、大小、颜色、透明度、位置） - 透明图层叠加法"""
         if not watermark_settings.get('enable', False):
             return img
+    
         text = watermark_settings.get('text', '')
         if not text:
             return img
+    
         font_name = watermark_settings.get('font', 'Arial')
         font_size = watermark_settings.get('size', 36)
-        opacity = watermark_settings.get('opacity', 80) / 100.0   # 0~1
-        position = watermark_settings.get('position', '右下')
+        opacity = watermark_settings.get('opacity', 80) / 100.0
         color_hex = watermark_settings.get('color', '#FFFFFF')
-        # 透明度为 0，直接返回原图（完全透明）
+        angle = watermark_settings.get('angle', 0)          # 新增
+        tile = watermark_settings.get('tile', False)        # 新增
+    
         if opacity <= 0:
             return img
-        # 确保图像为 RGBA 模式（支持透明通道）
+    
+        # 转为RGBA
         if img.mode != 'RGBA':
             img = img.convert('RGBA')
         w, h = img.size
-        # 创建一个全透明的图层
-        overlay = Image.new('RGBA', (w, h), (0, 0, 0, 0))
-        draw = ImageDraw.Draw(overlay)
+    
         # 解析颜色
         color_hex = color_hex.lstrip('#')
         r = int(color_hex[0:2], 16)
         g = int(color_hex[2:4], 16)
         b = int(color_hex[4:6], 16)
-        alpha = int(255 * opacity)   # 整体透明度
-        # 加载字体
+        alpha = int(255 * opacity)
+    
+        # 获取字体
         font = self._get_font(font_name, font_size)
-        # 获取文本尺寸
-        bbox = draw.textbbox((0, 0), text, font=font)
+    
+        # ---- 1. 生成单个水印图像（透明背景） ----
+        # 先计算文本尺寸（在未旋转时）
+        dummy_img = Image.new('RGBA', (1, 1))
+        draw_dummy = ImageDraw.Draw(dummy_img)
+        bbox = draw_dummy.textbbox((0, 0), text, font=font)
         tw, th = bbox[2] - bbox[0], bbox[3] - bbox[1]
-        w, h = img.size
-        # 动态边距：短边 * 3%
-        short_side = min(w, h)
-        padding = max(5, min(30, int(short_side * 0.03)))
-        # 位置映射
-        pos_map = {
-            '左上': (padding, padding),
-            '上': ((w - tw) // 2, padding),
-            '右上': (w - tw - padding, padding),
-            '左中': (padding, (h - th) // 2),
-            '中': ((w - tw) // 2, (h - th) // 2),
-            '右中': (w - tw - padding, (h - th) // 2),
-            '左下': (padding, h - th - padding),
-            '下': ((w - tw) // 2, h - th - padding),
-            '右下': (w - tw - padding, h - th - padding),
-        }
-        x, y = pos_map.get(position, (w - tw - padding, h - th - padding))
-        # 在透明图层上绘制文字（仅一次，无描边）
-        draw.text((x, y), text, font=font, fill=(r, g, b, alpha))
-        # 将透明图层与原图合成
-        result = Image.alpha_composite(img, overlay)
-        return result
+        # 创建足够大的画布容纳旋转后的文本（对角线）
+        import math
+        diag = int(math.hypot(tw, th)) + 10
+        wm_img = Image.new('RGBA', (diag, diag), (0, 0, 0, 0))
+        draw_wm = ImageDraw.Draw(wm_img)
+        # 居中绘制
+        x0 = (diag - tw) // 2
+        y0 = (diag - th) // 2
+        draw_wm.text((x0, y0), text, font=font, fill=(r, g, b, alpha))
+    
+        # ---- 2. 旋转 ----
+        if angle != 0:
+            wm_img = wm_img.rotate(angle, expand=True, resample=Image.BICUBIC)
+    
+
+        bbox = wm_img.getbbox()
+        if bbox:
+            # 可增加内边距（可选）
+            padding = 5
+            left, top, right, bottom = bbox
+            left = max(0, left - padding)
+            top = max(0, top - padding)
+            right = min(wm_img.width, right + padding)
+            bottom = min(wm_img.height, bottom + padding)
+            wm_img = wm_img.crop((left, top, right, bottom))
+        
+        wm_w, wm_h = wm_img.size
+
+    
+        # ---- 3. 平铺或单次放置 ----
+        if tile:
+            gap_x = watermark_settings.get('gap_x', 50)
+            gap_y = watermark_settings.get('gap_y', 50)
+            # 使用未旋转的文本尺寸作为步长基础
+            step_x = tw + gap_x
+            step_y = th + gap_y
+            result = Image.new('RGBA', (w, h), (0, 0, 0, 0))
+            y = 0
+            while y < h:
+                x = 0
+                while x < w:
+                    # 粘贴旋转后的水印块
+                    result.paste(wm_img, (x, y), wm_img)
+                    x += step_x
+                y += step_y
+            return Image.alpha_composite(img, result)
+
+        else:
+            # 单次放置，位置由原先的 position 决定（此时仍使用原有位置逻辑）
+            # 为了兼容，先计算位置坐标
+            # 但从原有代码看，位置是在原图上直接绘制的，现在改为贴图
+            # 重新计算位置（基于 wm_w, wm_h）
+            padding = max(5, min(30, int(min(w, h) * 0.03)))
+            pos_map = {
+                '左上': (padding, padding),
+                '上': ((w - wm_w) // 2, padding),
+                '右上': (w - wm_w - padding, padding),
+                '左中': (padding, (h - wm_h) // 2),
+                '中': ((w - wm_w) // 2, (h - wm_h) // 2),
+                '右中': (w - wm_w - padding, (h - wm_h) // 2),
+                '左下': (padding, h - wm_h - padding),
+                '下': ((w - wm_w) // 2, h - wm_h - padding),
+                '右下': (w - wm_w - padding, h - wm_h - padding),
+            }
+            position = watermark_settings.get('position', '右下')
+            x, y = pos_map.get(position, (w - wm_w - padding, h - wm_h - padding))
+            result = Image.new('RGBA', (w, h), (0,0,0,0))
+            result.paste(wm_img, (x, y), wm_img)
+    
+        # 合成
+        return Image.alpha_composite(img, result)
 
     def _add_initial_files(self):
         """处理命令行传入的文件/文件夹"""
@@ -2016,6 +2134,10 @@ class ImageConverter(TkinterDnD.Tk):
             self.global_preview_size = settings['preview_size']
         fmt = settings['format']
         qual = settings['quality']
+        if fmt == "WEBP" and qual == 101:
+            qual_display = "无损"
+        else:
+            qual_display = f"Q{qual}"
         rot = settings['rotation']
         rot_display = {"0°":"无", "90°":"左90", "-90°":"右90", "180°":"180"}.get(rot, rot)
         flip = []
@@ -2043,13 +2165,31 @@ class ImageConverter(TkinterDnD.Tk):
             if rest.startswith(('/', '\\')):
                 rest = rest[1:]
             name_part = rest
-        ext_map = {'JPEG':'.jpg', 'PNG':'.png', 'WEBP':'.webp'}
-        ext = ext_map.get(settings.get('format', 'JPEG'), '.jpg')
+        # 从 FORMAT_CONFIG 获取扩展名
+        fmt = settings.get('format', 'JPEG')
+        if fmt == "保持原格式":
+            ext = ".jpg"   # 示例保持 jpg
+        else:
+            config = FORMAT_CONFIG.get(fmt, {})
+            ext = config.get('extension', '.jpg')   # 默认 .jpg
         example_out = name_part + ext
-        
-        self.template_preview_label.config(
-            text=f"模板: {fmt} | Q{qual} | {rot_display} | {flip_str}{size_info}{crop_info} | 输出示例: {example_out}"
-        )
+
+        hint_text = self._get_quality_hint(settings)
+        full_text = f"模板: {fmt} | {qual_display} | {rot_display} | {flip_str}{size_info}{crop_info} | 输出示例: {example_out}{hint_text}"
+        self.template_preview_label.config(text=full_text)
+
+    def _get_quality_hint(self, settings):
+        fmt = settings.get('format')
+        config = FORMAT_CONFIG.get(fmt, {})
+        q_range = config.get('quality_range')
+        if q_range is None:
+            return ""
+        min_q, max_q = q_range
+        # 针对 WEBP 特殊提示
+        if fmt == "WEBP":
+            return f" (WEBP: {min_q}-{max_q}, 101=无损)"
+        else:
+            return f" ({fmt}: {min_q}-{max_q})"
 
 
     # ---------- 添加图片/文件夹 ----------
@@ -2419,22 +2559,23 @@ class ImageConverter(TkinterDnD.Tk):
         btn_frame.pack(fill=tk.X, pady=10)
     
         # 辅助函数：动态调整对话框高度
-        def adjust_dialog_height():
 
+        def adjust_dialog_height():
             dlg.update_idletasks()
             total_height = 0
             for child in left_panel.winfo_children():
-
                 total_height += child.winfo_reqheight()
-
+        
             decoration = 40
             new_height = total_height + decoration
-            # 降低最小高度，让收回时能缩小
             if new_height < 280:
                 new_height = 280
-
+        
             cur_width = dlg.winfo_width()
-            dlg.geometry(f"{cur_width}x{new_height}+{x}+{y}")
+            # 获取当前窗口左上角坐标，保持位置不变
+            cur_x = dlg.winfo_x()
+            cur_y = dlg.winfo_y()
+            dlg.geometry(f"{cur_width}x{new_height}+{cur_x}+{cur_y}")
             dlg.update_idletasks()
 
         # 保存原始的 _toggle_enhance 方法
