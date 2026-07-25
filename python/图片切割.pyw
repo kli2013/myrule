@@ -40,7 +40,7 @@ FORMAT_CONFIG = {
         'extension': '.webp',
         'save_params': {'quality': 'quality', 'lossless': False},
         'quality_range': (1, 100),
-        'default_quality': 80,
+        'default_quality': 85,
         'mode': None,
         'supports_exif': True,
     },
@@ -816,8 +816,8 @@ class App:
         self.quality_label = tk.Label(self.quality_frame, text="质量:")
         self.quality_label.pack(side=tk.LEFT, padx=5)
         self.quality_var = tk.StringVar(value="85")
-        self.quality_entry = tk.Entry(self.quality_frame, textvariable=self.quality_var, width=5)
-        self.quality_entry.pack(side=tk.LEFT, padx=2)
+        self.quality_spin = ttk.Spinbox(self.quality_frame, from_=1, to=100, textvariable=self.quality_var, width=5, state='normal')
+        self.quality_spin.pack(side=tk.LEFT, padx=2)
 
 
 
@@ -826,7 +826,7 @@ class App:
         
         # ---- 新增 ICO 尺寸设置按钮（初始隐藏） ----
         self.ico_sizes = [(16,16), (32,32), (48,48), (64,64), (128,128), (256,256)]  # ICO尺寸列表
-        self.ico_size_btn = tk.Button(format_frame, text="设置ICO尺寸", command=self.edit_ico_sizes)
+        self.ico_size_btn = tk.Button(format_frame, text="设置ICO尺寸", font=("", 10), bd=1, command=self.edit_ico_sizes)
         self.ico_size_btn.pack(side=tk.LEFT, padx=5)
         self.ico_size_btn.pack_forget()   # 默认隐藏
 
@@ -909,6 +909,8 @@ class App:
 
         self.cancel_flag = False  # 单张切割取消标志
         self.batch_cancel_flag = False  # 批量切割取消标志
+        
+        self.preview_padding = 10   # 预览画布边距（像素）
 
         self.on_mode_changed()
         self.on_format_change()
@@ -917,6 +919,8 @@ class App:
         
         self.update_dir_frame_visibility()
         master.protocol("WM_DELETE_WINDOW", self.quit_app)
+
+
 
 
     def _on_quality_changed(self, *args):
@@ -1193,9 +1197,14 @@ class App:
             save_params['sizes'] = self.ico_sizes
 
 
-        if fmt == "WEBP" and int(self.quality_var.get()) == 101:
-            save_params['lossless'] = True
-            save_params['quality'] = 100
+        if fmt == "WEBP":
+            try:
+                q_val = int(quality)
+                if q_val == 101:
+                    save_params['lossless'] = True
+                    save_params['quality'] = 100
+            except:
+                pass
 
         target_mode = config.get('mode')
         if target_mode and img.mode != target_mode:
@@ -1262,63 +1271,104 @@ class App:
             self.open_preview_window()
             self.preview_btn.config(text="关闭预览窗口")
 
+
+
+
     def resize_preview_window_for_image(self):
         if not self.preview_window or not self.preview_window.winfo_exists():
             return
-        if not self.original_img:
-            return
-        img_w, img_h = self.original_img.size
-        screen_w = self.master.winfo_screenwidth()
-        screen_h = self.master.winfo_screenheight()
-        max_w = int(screen_w * 0.7)
-        max_h = int(screen_h * 0.7)
-        scale = min(max_w / img_w, max_h / img_h)
-        new_w = int(img_w * scale)
-        new_h = int(img_h * scale)
-        new_w = max(300, new_w)
-        new_h = max(200, new_h)
+        win_w, win_h = self._compute_preview_window_size()
         main_x = self.master.winfo_x()
         main_y = self.master.winfo_y()
         main_w = self.master.winfo_width()
-        if main_x + main_w + new_w + 10 <= screen_w:
+        screen_w = self.master.winfo_screenwidth()
+        if main_x + main_w + win_w + 10 <= screen_w:
             pos_x = main_x + main_w + 10
         else:
-            pos_x = screen_w - new_w - 10
+            pos_x = screen_w - win_w - 10
         pos_y = main_y
-        if pos_y + new_h > screen_h:
-            pos_y = max(10, screen_h - new_h - 10)
-        self.preview_window.geometry(f"{new_w}x{new_h}+{pos_x}+{pos_y}")
+        screen_h = self.master.winfo_screenheight()
+        if pos_y + win_h > screen_h:
+            pos_y = max(10, screen_h - win_h - 10)
+        self.preview_window.geometry(f"{win_w}x{win_h}+{pos_x}+{pos_y}")
+
+    def _compute_preview_window_size(self):
+        """计算预览窗口的推荐尺寸（包含边距）"""
+        if not self.original_img:
+            return 620, 520  # 默认尺寸（含边距）
+        img_w, img_h = self.original_img.size
+        screen_w = self.master.winfo_screenwidth()
+        screen_h = self.master.winfo_screenheight()
+        max_w = int(screen_w * 0.7) - 2 * self.preview_padding
+        max_h = int(screen_h * 0.7) - 2 * self.preview_padding
+        max_w = max(300, max_w)
+        max_h = max(200, max_h)
+        scale = min(max_w / img_w, max_h / img_h)
+        disp_w = int(img_w * scale)
+        disp_h = int(img_h * scale)
+        win_w = disp_w + 2 * self.preview_padding
+        win_h = disp_h + 2 * self.preview_padding
+        return win_w, win_h
+
+    def update_preview_in_subwindow(self):
+        if not self.original_img or not self.preview_canvas:
+            return
+        self.preview_canvas.update_idletasks()
+        cw = self.preview_canvas.winfo_width()
+        ch = self.preview_canvas.winfo_height()
+        if cw <= 1 or ch <= 1:
+            cw, ch = 600, 500
+        avail_w = cw - 2 * self.preview_padding
+        avail_h = ch - 2 * self.preview_padding
+        if avail_w <= 0 or avail_h <= 0:
+            return
+        # 保存可用区域尺寸供后续使用
+        self.preview_avail_w = avail_w
+        self.preview_avail_h = avail_h
+    
+        img_w, img_h = self.original_img.size
+        scale = min(avail_w / img_w, avail_h / img_h)
+        new_w = int(img_w * scale)
+        new_h = int(img_h * scale)
+        x = self.preview_padding
+        y = self.preview_padding
+        resized = self.original_img.resize((new_w, new_h), Image.Resampling.NEAREST)
+        self.preview_photo = ImageTk.PhotoImage(resized)
+        self.preview_canvas.delete("all")
+        self.preview_canvas.create_image(x, y, anchor=tk.NW, image=self.preview_photo, tags="preview_img")
+        self.preview_img_pos = (x, y, new_w, new_h)
+        # 绘制切割线（保持不变）
+        mode = self.cut_mode.get()
+        if mode == "grid":
+            self.draw_grid_lines_sub()
+        elif mode == "smart":
+            self.draw_smart_lines_sub()
+        elif mode == "advanced":
+            self.draw_advanced_lines_sub()
+        else:
+            self.draw_free_lines_sub()
+
 
     def open_preview_window(self):
         if self.preview_window is not None and self.preview_window.winfo_exists():
             self.preview_window.lift()
             return
+        win_w, win_h = self._compute_preview_window_size()
         main_x = self.master.winfo_x()
         main_y = self.master.winfo_y()
         main_w = self.master.winfo_width()
-        if self.original_img:
-            img_w, img_h = self.original_img.size
-            screen_w = self.master.winfo_screenwidth()
-            screen_h = self.master.winfo_screenheight()
-            max_w = int(screen_w * 0.7)
-            max_h = int(screen_h * 0.7)
-            scale = min(max_w / img_w, max_h / img_h)
-            preview_w = max(300, int(img_w * scale))
-            preview_h = max(200, int(img_h * scale))
-        else:
-            preview_w, preview_h = 600, 500
         pos_x = main_x + main_w + 10
         pos_y = main_y
         screen_w = self.master.winfo_screenwidth()
-        if pos_x + preview_w > screen_w:
-            pos_x = max(10, main_x - preview_w - 10)
+        if pos_x + win_w > screen_w:
+            pos_x = max(10, main_x - win_w - 10)
         screen_h = self.master.winfo_screenheight()
-        if pos_y + preview_h > screen_h:
-            pos_y = max(10, screen_h - preview_h - 10)
+        if pos_y + win_h > screen_h:
+            pos_y = max(10, screen_h - win_h - 10)
         self.preview_window = tk.Toplevel(self.master)
         self.preview_window.title("图片预览")
         self.preview_window.attributes('-toolwindow', 1)
-        self.preview_window.geometry(f"{preview_w}x{preview_h}+{pos_x}+{pos_y}")
+        self.preview_window.geometry(f"{win_w}x{win_h}+{pos_x}+{pos_y}")
         self.preview_canvas = tk.Canvas(self.preview_window, bg='#f0f0f0')
         self.preview_canvas.pack(fill=tk.BOTH, expand=True)
         self.preview_canvas.bind("<Configure>", self.on_preview_canvas_resize)
@@ -1346,33 +1396,7 @@ class App:
         if self.original_img and self.preview_canvas:
             self.update_preview_in_subwindow()
 
-    def update_preview_in_subwindow(self):
-        if not self.original_img or not self.preview_canvas:
-            return
-        cw = self.preview_canvas.winfo_width()
-        ch = self.preview_canvas.winfo_height()
-        if cw <= 1 or ch <= 1:
-            cw, ch = 600, 500
-        img_w, img_h = self.original_img.size
-        scale = min(cw / img_w, ch / img_h)
-        new_w = int(img_w * scale)
-        new_h = int(img_h * scale)
-        resized = self.original_img.resize((new_w, new_h), Image.Resampling.NEAREST)
-        self.preview_photo = ImageTk.PhotoImage(resized)
-        x = (cw - new_w) // 2
-        y = (ch - new_h) // 2
-        self.preview_canvas.delete("all")
-        self.preview_canvas.create_image(x, y, anchor=tk.NW, image=self.preview_photo, tags="preview_img")
-        self.preview_img_pos = (x, y, new_w, new_h)
-        mode = self.cut_mode.get()
-        if mode == "grid":
-            self.draw_grid_lines_sub()
-        elif mode == "smart":
-            self.draw_smart_lines_sub()
-        elif mode == "advanced":
-            self.draw_advanced_lines_sub()
-        else:
-            self.draw_free_lines_sub()
+
 
     def draw_grid_lines_sub(self):
         if not self.original_img or not self.preview_canvas:
@@ -1723,43 +1747,58 @@ class App:
             self.ico_size_btn.pack_forget()
             self.quality_frame.pack(side=tk.LEFT, padx=5)
     
-        # 设置标签文本
-        if fmt == "PNG":
-            self.quality_label.config(text="压缩:")
-        else:
-            self.quality_label.config(text="质量:")
-    
-        # 设置质量提示
+        # 设置 Spinbox 范围
         if fmt == "WEBP":
+            self.quality_spin.config(from_=1, to=101)
             self.hint_label.config(text="(WEBP: 1-100, 101=无损)")
+        elif fmt == "PNG":
+            self.quality_spin.config(from_=0, to=9)
+            self.hint_label.config(text="(PNG: 0-9)")
         else:
+            self.quality_spin.config(from_=1, to=100)
             if q_range is not None:
                 min_q, max_q = q_range
                 self.hint_label.config(text=f"({fmt}: {min_q}-{max_q})")
             else:
                 self.hint_label.config(text="(此格式忽略质量参数)")
     
+        # 设置标签文本
+        if fmt == "PNG":
+            base_label = "压缩:"
+        else:
+            base_label = "质量:"
+        # 如果是 WEBP 且当前值为101，显示“无损:”
+        if fmt == "WEBP":
+            try:
+                cur_val = int(self.quality_var.get())
+            except:
+                cur_val = 0
+            if cur_val == 101:
+                self.quality_label.config(text="无损:")
+            else:
+                self.quality_label.config(text=base_label)
+        else:
+            self.quality_label.config(text=base_label)
+    
         # 设置默认值（仅当非WEBP或当前值不是101时重置）
         if q_range is not None:
-            # 如果当前是 WEBP 且值为 101，保留
-            if fmt == "WEBP" and self.quality_var.get() == "101":
-                pass
+            if fmt == "WEBP":
+                try:
+                    cur_val = int(self.quality_var.get())
+                except:
+                    cur_val = 0
+                if cur_val != 101:
+                    new_val = default_q if default_q is not None else q_range[0]
+                    self.quality_var.set(str(new_val))
             else:
-                if default_q is not None:
-                    new_val = default_q
-                else:
-                    new_val = q_range[0]
+                new_val = default_q if default_q is not None else q_range[0]
                 self.quality_var.set(str(new_val))
         # 对于无质量参数的格式（如 BMP），保留原值
     
-        # 调用 _on_quality_changed 更新输入框状态和标签（针对 WEBP 101 状态）
+        # 调用 _on_quality_changed 更新输入框状态
         self._on_quality_changed()
 
-    def _on_lossless_toggle(self):
-        if self.webp_lossless_var.get():
-            self.quality_entry.config(state=tk.DISABLED)
-        else:
-            self.quality_entry.config(state=tk.NORMAL)
+
 
     def edit_ico_sizes(self):
         """弹出对话框编辑 ICO 尺寸列表"""
@@ -1857,9 +1896,14 @@ class App:
         else:
             save_params.update(config['save_params'])
         # ---- 处理 WebP 无损 ----
-        if fmt == "WEBP" and int(quality) == 101:
-            save_params['lossless'] = True
-            save_params['quality'] = 100
+        if fmt == "WEBP":
+            try:
+                q_val = int(self.quality_var.get())
+                if q_val == 101:
+                    save_params['lossless'] = True
+                    save_params['quality'] = 100
+            except:
+                pass
         if fmt == "ICO":
             save_params['sizes'] = self.ico_sizes
         save_params['format'] = fmt
@@ -2086,93 +2130,79 @@ class App:
                 self.rect_id = None
 
 
+    def _clamp_to_image(self, canvas_x, canvas_y):
+        """将 canvas 坐标钳制到图片显示区域内，返回 (clamped_x, clamped_y)"""
+        x0, y0, w, h = self.preview_img_pos
+        cx = max(x0, min(x0 + w, canvas_x))
+        cy = max(y0, min(y0 + h, canvas_y))
+        return cx, cy
+    
+
+
+    def _apply_ratio_and_clamp(self, canvas_x, canvas_y, start_x, start_y):
+        """
+        根据锁定的比例调整终点坐标，并钳制到图片显示区域内。
+        返回 (clamped_x, clamped_y)
+        """
+        # 先钳制原始坐标（确保在图片内）
+        clamped_x, clamped_y = self._clamp_to_image(canvas_x, canvas_y)
+        if not self.lock_ratio.get():
+            return clamped_x, clamped_y
+        ratio_str = self.ratio_var.get()
+        ratio = self.parse_ratio(ratio_str)
+        if ratio is None:
+            return clamped_x, clamped_y
+        # 计算比例锁定后的坐标
+        dx = clamped_x - start_x
+        dy = clamped_y - start_y
+        if abs(dx) >= abs(dy):
+            new_dx = dx
+            new_dy = abs(dx) / ratio if dx != 0 else 0
+            if dy < 0:
+                new_dy = -new_dy
+            clamped_y = start_y + new_dy
+        else:
+            new_dy = dy
+            new_dx = abs(dy) * ratio if dy != 0 else 0
+            if dx < 0:
+                new_dx = -new_dx
+            clamped_x = start_x + new_dx
+        # 再次钳制（防止比例调整后越界）
+        return self._clamp_to_image(clamped_x, clamped_y)
+    
     def on_mouse_down(self, event):
         if not self.drawing_enabled or not self.original_img:
             return
-        canvas_x = event.x
-        canvas_y = event.y
-        x0, y0, w, h = self.preview_img_pos
-        if not (x0 <= canvas_x <= x0 + w and y0 <= canvas_y <= y0 + h):
-            return
-        self.start_x = canvas_x
-        self.start_y = canvas_y
+        self.start_x, self.start_y = self._clamp_to_image(event.x, event.y)
         self.rect_id = self.preview_canvas.create_rectangle(
             self.start_x, self.start_y, self.start_x, self.start_y,
             outline="orange", width=2, tags="temp_rect"
         )
-
-
+    
     def on_mouse_move(self, event):
         if self.start_x is None or self.rect_id is None:
             return
-        canvas_x = event.x
-        canvas_y = event.y
-        x0, y0, w, h = self.preview_img_pos
-        canvas_x = max(x0, min(x0 + w, canvas_x))
-        canvas_y = max(y0, min(y0 + h, canvas_y))
-        if self.lock_ratio.get():
-            ratio_str = self.ratio_var.get()
-            ratio = self.parse_ratio(ratio_str)
-            if ratio is not None:
-                dx = canvas_x - self.start_x
-                dy = canvas_y - self.start_y
-                if abs(dx) >= abs(dy):
-                    new_dx = dx
-                    new_dy = abs(dx) / ratio if dx != 0 else 0
-                    if dy < 0:
-                        new_dy = -new_dy
-                    canvas_y = self.start_y + new_dy
-                else:
-                    new_dy = dy
-                    new_dx = abs(dy) * ratio if dy != 0 else 0
-                    if dx < 0:
-                        new_dx = -new_dx
-                    canvas_x = self.start_x + new_dx
-                canvas_x = max(x0, min(x0 + w, canvas_x))
-                canvas_y = max(y0, min(y0 + h, canvas_y))
+        canvas_x, canvas_y = self._apply_ratio_and_clamp(event.x, event.y, self.start_x, self.start_y)
         self.preview_canvas.coords(self.rect_id, self.start_x, self.start_y, canvas_x, canvas_y)
-
-
+    
     def on_mouse_up(self, event):
         if self.start_x is None or self.rect_id is None:
             return
-        canvas_x = event.x
-        canvas_y = event.y
-        x0, y0, w, h = self.preview_img_pos
-        canvas_x = max(x0, min(x0 + w, canvas_x))
-        canvas_y = max(y0, min(y0 + h, canvas_y))
-        if self.lock_ratio.get():
-            ratio_str = self.ratio_var.get()
-            ratio = self.parse_ratio(ratio_str)
-            if ratio is not None:
-                dx = canvas_x - self.start_x
-                dy = canvas_y - self.start_y
-                if abs(dx) >= abs(dy):
-                    new_dx = dx
-                    new_dy = abs(dx) / ratio if dx != 0 else 0
-                    if dy < 0:
-                        new_dy = -new_dy
-                    canvas_y = self.start_y + new_dy
-                else:
-                    new_dy = dy
-                    new_dx = abs(dy) * ratio if dy != 0 else 0
-                    if dx < 0:
-                        new_dx = -new_dx
-                    canvas_x = self.start_x + new_dx
-                canvas_x = max(x0, min(x0 + w, canvas_x))
-                canvas_y = max(y0, min(y0 + h, canvas_y))
-        img_w, img_h = self.original_img.size
-        scale_x = img_w / w
-        scale_y = img_h / h
+        canvas_x, canvas_y = self._apply_ratio_and_clamp(event.x, event.y, self.start_x, self.start_y)
+        # 计算矩形区域（已钳制）
         left = min(self.start_x, canvas_x)
         right = max(self.start_x, canvas_x)
         top = min(self.start_y, canvas_y)
         bottom = max(self.start_y, canvas_y)
-        orig_left = int((left - x0) * scale_x)
-        orig_top = int((top - y0) * scale_y)
-        orig_right = int((right - x0) * scale_x)
-        orig_bottom = int((bottom - y0) * scale_y)
-        if orig_right > orig_left and orig_bottom > orig_top:
+        if right > left and bottom > top:
+            x0, y0, w, h = self.preview_img_pos
+            img_w, img_h = self.original_img.size
+            scale_x = img_w / w
+            scale_y = img_h / h
+            orig_left = int((left - x0) * scale_x)
+            orig_top = int((top - y0) * scale_y)
+            orig_right = int((right - x0) * scale_x)
+            orig_bottom = int((bottom - y0) * scale_y)
             x = orig_left
             y = orig_top
             w = orig_right - orig_left
@@ -2184,6 +2214,8 @@ class App:
         self.rect_id = None
         self.start_x = None
         self.start_y = None
+
+
 
 
     def delete_selected_rect(self, event):
