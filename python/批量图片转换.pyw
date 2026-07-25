@@ -872,14 +872,6 @@ class TemplateEditor(ttk.Frame):
         return settings
 
     
-        if self.include_exif_date_delete:
-            settings.update({
-                'keep_exif': self.keep_exif_var.get(),
-                'preserve_original_date': self.preserve_date_var.get(),
-                'delete_original': self.delete_original_var.get(),
-            })
-        return settings
-    
     def set_settings(self, settings):
         self._loading_preset = True   # 开始加载预设
         try:
@@ -988,6 +980,8 @@ class ImageConverter(TkinterDnD.Tk):
         self.visual_crop_callback = None   # 外部设置的回调函数
         self.current_preview_task = None   # 当前显示的预览任务
         self.active_crop_editor = None
+        
+        self.canvas_padding = 10         #预览画布四周的空白边距（像素）
 
         self.initial_files = []
         if len(sys.argv) > 1:
@@ -1123,7 +1117,7 @@ class ImageConverter(TkinterDnD.Tk):
 
     def visual_crop_mode(self, task=None, on_finish=None):
         """
-        启用可视化裁剪模式（支持在已有裁剪基础上追加裁剪）
+        可视化裁剪模式（预览画布已带10px边距，提示居中）
         """
         if task is None:
             task = self.current_preview_task
@@ -1135,9 +1129,8 @@ class ImageConverter(TkinterDnD.Tk):
     
         editor = self.active_crop_editor if self.active_crop_editor is not None else self.template_editor
     
-        # ========== 1. 获取当前裁剪参数作为基准偏移 ==========
+        # 获取当前裁剪参数作为基准偏移
         settings = editor.get_settings()
-        # 先获取旋转翻转后的完整图像尺寸（用于计算绝对坐标边界）
         try:
             with Image.open(task['path']) as orig_img:
                 rotated_img = self._apply_all_transforms_up_to_crop(orig_img, settings)
@@ -1155,7 +1148,6 @@ class ImageConverter(TkinterDnD.Tk):
             base_y = self.eval_crop_expr(settings['crop_y'], full_w, full_h)
             base_w = self.eval_crop_expr(settings['crop_w'], full_w, full_h)
             base_h = self.eval_crop_expr(settings['crop_h'], full_w, full_h)
-            # 边界保护
             base_x = max(0, min(base_x, full_w - 1))
             base_y = max(0, min(base_y, full_h - 1))
             base_w = min(base_w, full_w - base_x)
@@ -1164,7 +1156,7 @@ class ImageConverter(TkinterDnD.Tk):
             base_x = base_y = 0
             base_w, base_h = full_w, full_h
     
-        # ========== 2. 预览裁剪后的图像（基准区域） ==========
+        # 预览裁剪后的图像（基准区域）
         preview_settings = settings.copy()
         preview_settings['crop_enabled'] = True
         preview_settings['crop_x'] = str(base_x)
@@ -1172,6 +1164,7 @@ class ImageConverter(TkinterDnD.Tk):
         preview_settings['crop_w'] = str(base_w)
         preview_settings['crop_h'] = str(base_h)
     
+        # 确保预览窗口存在并更新内容（画布已带边距）
         if not self.preview_window or not self.preview_window.winfo_exists():
             self._show_preview(task)
         self._update_preview_content(task, override_settings=preview_settings, sync=True)
@@ -1183,131 +1176,145 @@ class ImageConverter(TkinterDnD.Tk):
                 on_finish()
             return
     
-        # 获取画布上的图像对象
-        image_obj = None
-        for item in canvas.find_all():
-            if canvas.type(item) == "image":
-                image_obj = item
-                break
-        if not image_obj:
-            messagebox.showwarning("警告", "未找到预览图片")
-            if on_finish:
-                on_finish()
-            return
+        # ---- 从画布获取边距和缩略图尺寸（由 __init__   self.canvas_padding = 10 设置） ----
+        PADDING = getattr(canvas, 'padding', self.canvas_padding)
+        thumb_w = getattr(canvas, 'thumb_w', canvas.winfo_width() - 2 * PADDING)
+        thumb_h = getattr(canvas, 'thumb_h', canvas.winfo_height() - 2 * PADDING)
     
-        bbox = canvas.bbox(image_obj)
-        if not bbox:
-            messagebox.showerror("错误", "无法获取图片位置")
-            if on_finish:
-                on_finish()
-            return
-        img_x1, img_y1, img_x2, img_y2 = bbox
-        display_w = img_x2 - img_x1
-        display_h = img_y2 - img_y1
-    
-        # 比例尺：当前显示的是基准区域（base_w x base_h）
-        scale_x = base_w / display_w if display_w > 0 else 1
-        scale_y = base_h / display_h if display_h > 0 else 1
-    
-        # ========== 3. 交互绘制（与之前相同，但坐标转换有偏移） ==========
-     #   old_cursor = canvas.cget("cursor")
-    #    canvas.config(cursor="crosshair")
-    
+        # ---- 清除旧的辅助元素 ----
+        canvas.delete("crop_guide")
         canvas.delete("crop_hint")
-        hint_text = canvas.create_text(
-            canvas.winfo_width()//2, canvas.winfo_height()//2 - 30,
+        canvas.delete("crop_rect")
+    
+        # ---- 比例尺：缩略图显示区域 → 基准区域 ----
+        scale_x = base_w / thumb_w if thumb_w > 0 else 1
+        scale_y = base_h / thumb_h if thumb_h > 0 else 1
+    
+        # ---- 显示提示文字（居中于画布） ----
+        canvas_width = canvas.winfo_width()
+        canvas_height = canvas.winfo_height()
+        # 计算画布中心坐标
+        center_x = canvas_width // 2
+        center_y = canvas_height // 2 - 20   # 稍微向上偏移一点，视觉更平衡
+    
+        hint = canvas.create_text(
+            center_x, center_y,
             text="🖱 拖拽绘制裁剪区域\nShift: 保持正方形\n取消勾选可重置预览",
-            font=("", 14, "bold"), fill="black", tags="crop_hint"
+            font=("", 14, "bold"), fill="black", tags="crop_guide"
         )
-        hint_bbox = canvas.bbox(hint_text)
-        if hint_bbox:
+        # 文字背景（半透明黑色衬底，提高可读性）
+        bbox = canvas.bbox(hint)
+        if bbox:
             canvas.create_rectangle(
-                hint_bbox[0]-20, hint_bbox[1]-15, hint_bbox[2]+20, hint_bbox[3]+15,
+                bbox[0]-15, bbox[1]-15, bbox[2]+15, bbox[3]+15,
                 fill="white", outline="gray", width=1, tags="crop_hint"
             )
-            canvas.tag_raise(hint_text)
+            canvas.tag_raise(hint)
     
+        # ---- 坐标转换函数 ----
+        def canvas_to_thumb(cx, cy):
+            """将 canvas 坐标转为缩略图相对坐标，并钳制到 [0, thumb_w]×[0, thumb_h]"""
+            dx = cx - PADDING
+            dy = cy - PADDING
+            dx = max(0, min(dx, thumb_w))
+            dy = max(0, min(dy, thumb_h))
+            return dx, dy
+    
+        def thumb_to_base(tx, ty):
+            """缩略图相对坐标 → 基准区域坐标（整数）"""
+            return int(tx * scale_x), int(ty * scale_y)
+    
+        # ---- 拖拽状态 ----
         self.rect_id = None
-        self.start_x = self.start_y = None
+        self.start_thumb = None
     
+        # ---- 鼠标事件处理 ----
         def on_mouse_down(event):
+            # 清除提示文字（开始拖拽时隐藏）
+            canvas.delete("crop_guide")
+            canvas.delete("crop_hint")
             cx = canvas.canvasx(event.x)
             cy = canvas.canvasy(event.y)
-            if img_x1 <= cx <= img_x2 and img_y1 <= cy <= img_y2:
-                self.start_x, self.start_y = cx, cy
-                canvas.delete("crop_hint")
-                if self.rect_id:
-                    canvas.delete(self.rect_id)
-                    self.rect_id = None
+            tx, ty = canvas_to_thumb(cx, cy)
+            self.start_thumb = (tx, ty)
+            canvas.delete("crop_rect")   # 清除旧矩形
     
         def on_mouse_move(event):
-            if self.start_x is None:
+            if self.start_thumb is None:
                 return
-            cx = max(img_x1, min(canvas.canvasx(event.x), img_x2))
-            cy = max(img_y1, min(canvas.canvasy(event.y), img_y2))
+            cx = canvas.canvasx(event.x)
+            cy = canvas.canvasy(event.y)
+            cur_tx, cur_ty = canvas_to_thumb(cx, cy)
+            sx, sy = self.start_thumb
     
             shift = bool(event.state & 0x0001)
-            end_x, end_y = cx, cy
+            end_tx, end_ty = cur_tx, cur_ty
             if shift:
-                dx = cx - self.start_x
-                dy = cy - self.start_y
+                dx = cur_tx - sx
+                dy = cur_ty - sy
                 size = max(abs(dx), abs(dy))
-                end_x = self.start_x + (size if dx >= 0 else -size)
-                end_y = self.start_y + (size if dy >= 0 else -size)
-                end_x = max(img_x1, min(end_x, img_x2))
-                end_y = max(img_y1, min(end_y, img_y2))
+                end_tx = sx + (size if dx >= 0 else -size)
+                end_ty = sy + (size if dy >= 0 else -size)
+                end_tx = max(0, min(end_tx, thumb_w))
+                end_ty = max(0, min(end_ty, thumb_h))
+    
+            # 绘制矩形（使用画布绝对坐标，加上 PADDING）
+            x1 = min(sx, end_tx) + PADDING
+            y1 = min(sy, end_ty) + PADDING
+            x2 = max(sx, end_tx) + PADDING
+            y2 = max(sy, end_ty) + PADDING
     
             if self.rect_id:
-                canvas.coords(self.rect_id, self.start_x, self.start_y, end_x, end_y)
+                canvas.coords(self.rect_id, x1, y1, x2, y2)
             else:
                 self.rect_id = canvas.create_rectangle(
-                    self.start_x, self.start_y, end_x, end_y,
-                    outline='red', width=2, dash=(4, 2)
+                    x1, y1, x2, y2, outline='red', width=2, dash=(4, 2), tags="crop_rect"
                 )
     
         def on_mouse_up(event):
-            if self.start_x is None:
+            if self.start_thumb is None:
                 _cleanup()
                 return
-    
-            cx = max(img_x1, min(canvas.canvasx(event.x), img_x2))
-            cy = max(img_y1, min(canvas.canvasy(event.y), img_y2))
+            cx = canvas.canvasx(event.x)
+            cy = canvas.canvasy(event.y)
+            cur_tx, cur_ty = canvas_to_thumb(cx, cy)
+            sx, sy = self.start_thumb
     
             shift = bool(event.state & 0x0001)
-            end_x, end_y = cx, cy
+            end_tx, end_ty = cur_tx, cur_ty
             if shift:
-                dx = cx - self.start_x
-                dy = cy - self.start_y
+                dx = cur_tx - sx
+                dy = cur_ty - sy
                 size = max(abs(dx), abs(dy))
-                end_x = self.start_x + (size if dx >= 0 else -size)
-                end_y = self.start_y + (size if dy >= 0 else -size)
-                end_x = max(img_x1, min(end_x, img_x2))
-                end_y = max(img_y1, min(end_y, img_y2))
+                end_tx = sx + (size if dx >= 0 else -size)
+                end_ty = sy + (size if dy >= 0 else -size)
+                end_tx = max(0, min(end_tx, thumb_w))
+                end_ty = max(0, min(end_ty, thumb_h))
     
-            x1 = min(self.start_x, end_x)
-            y1 = min(self.start_y, end_y)
-            x2 = max(self.start_x, end_x)
-            y2 = max(self.start_y, end_y)
+            # 计算缩略图上的相对矩形
+            x1 = min(sx, end_tx)
+            y1 = min(sy, end_ty)
+            x2 = max(sx, end_tx)
+            y2 = max(sy, end_ty)
     
-            # 相对坐标（相对于当前基准区域）
-            rel_x = int((x1 - img_x1) * scale_x)
-            rel_y = int((y1 - img_y1) * scale_y)
+            # 映射到基准区域坐标
+            rel_x, rel_y = thumb_to_base(x1, y1)
             rel_w = int((x2 - x1) * scale_x)
             rel_h = int((y2 - y1) * scale_y)
     
-            # 转换为绝对坐标（相对于旋转翻转后的完整图像）
+            # 转换为绝对坐标（相对于完整图像）
             final_x = base_x + rel_x
             final_y = base_y + rel_y
             final_w = rel_w
             final_h = rel_h
     
-            # 边界限制（不能超出完整图像）
+            # 边界保护（防止超出完整图像）
             final_x = max(0, min(final_x, full_w - 1))
             final_y = max(0, min(final_y, full_h - 1))
             final_w = max(1, min(final_w, full_w - final_x))
             final_h = max(1, min(final_h, full_h - final_y))
     
-            # 回写编辑器（绝对坐标）
+            # 回写编辑器
             editor.crop_x_var.set(str(final_x))
             editor.crop_y_var.set(str(final_y))
             editor.crop_w_var.set(str(final_w))
@@ -1315,7 +1322,6 @@ class ImageConverter(TkinterDnD.Tk):
             editor.crop_enabled_var.set(True)
     
             _cleanup()
-    
             # 刷新预览（应用新裁剪）
             self._update_preview_content(task, override_settings=editor.get_settings(), sync=True)
             if on_finish:
@@ -1325,13 +1331,13 @@ class ImageConverter(TkinterDnD.Tk):
             canvas.unbind("<ButtonPress-1>")
             canvas.unbind("<B1-Motion>")
             canvas.unbind("<ButtonRelease-1>")
-            if self.rect_id:
-                canvas.delete(self.rect_id)
-                self.rect_id = None
-            self.start_x = self.start_y = None
+            canvas.delete("crop_guide")
+            canvas.delete("crop_rect")
             canvas.delete("crop_hint")
-        #    canvas.config(cursor=old_cursor)
+            self.rect_id = None
+            self.start_thumb = None
     
+        # ---- 绑定事件 ----
         canvas.bind("<ButtonPress-1>", on_mouse_down)
         canvas.bind("<B1-Motion>", on_mouse_move)
         canvas.bind("<ButtonRelease-1>", on_mouse_up)
@@ -1693,7 +1699,6 @@ class ImageConverter(TkinterDnD.Tk):
         self.preview_window.geometry(f"+{x}+{y}")
 
     def _update_preview_content(self, task, override_settings=None, sync=False):
-        """生成预览，可传入 override_settings 覆盖任务参数；sync=True 时同步执行"""
         if self.preview_window is None or not self.preview_window.winfo_exists():
             return
         if self._preview_after_id is not None:
@@ -1707,9 +1712,10 @@ class ImageConverter(TkinterDnD.Tk):
         if self.preview_status:
             self.preview_status.config(text="正在生成预览...")
     
+        PADDING = self.canvas_padding
+    
         def generate():
             try:
-                # 若提供了覆盖参数，则合并到任务副本中
                 if override_settings:
                     temp_task = task.copy()
                     temp_task.update(override_settings)
@@ -1722,17 +1728,41 @@ class ImageConverter(TkinterDnD.Tk):
                     preview_size = self.global_preview_size
                     img.thumbnail((preview_size, preview_size), Image.NEAREST)
                     thumb_w, thumb_h = img.size
-                    win_w = thumb_w + 20
-                    win_h = thumb_h + 70
+    
+                    # ---- 创建带边距的画布 ----
+                    canvas_w = thumb_w + 2 * PADDING
+                    canvas_h = thumb_h + 2 * PADDING
+                    win_w = canvas_w + 20      # 窗口额外边距
+                    win_h = canvas_h + 70      # 状态栏高度
                     self.preview_window.geometry(f"{win_w}x{win_h}")
-                    self.preview_canvas.config(width=thumb_w, height=thumb_h)
+                    self.preview_canvas.config(width=canvas_w, height=canvas_h)
+    
+                    # 绘制图片（偏移 PADDING）
                     photo = ImageTk.PhotoImage(img)
                     self.preview_canvas.delete("all")
-                    self.preview_canvas.create_image(thumb_w//2, thumb_h//2, image=photo, anchor=tk.CENTER)
+                    self.preview_canvas.create_image(PADDING, PADDING, anchor=tk.NW, image=photo, tags="preview_img")
                     self.preview_canvas.image = photo
-                    self.preview_canvas.update_idletasks()
-                    if self.preview_status:
-                        self.preview_status.config(text=f"预览完成 | 缩略图尺寸: {thumb_w}x{thumb_h}")
+    
+                    # ---- 可选：绘制边距边界（辅助线） ----
+                    self.preview_canvas.create_rectangle(
+                        PADDING, PADDING, PADDING+thumb_w, PADDING+thumb_h,
+                        outline="gray", dash=(2,2), tags="border"
+                    )
+    
+                    # 更新状态
+                    orig_w = img_task.get('orig_w', 0)
+                    orig_h = img_task.get('orig_h', 0)
+                    orig_str = f"原始: {orig_w}x{orig_h}" if orig_w and orig_h else ""
+                    status_text = f"预览完成 | 缩略图: {thumb_w}x{thumb_h}"
+                    if orig_str:
+                        status_text += f" | {orig_str}"
+                    self.preview_status.config(text=status_text)
+    
+                    # 保存边距信息到 canvas（供可视化使用）
+                    self.preview_canvas.padding = PADDING
+                    self.preview_canvas.thumb_w = thumb_w
+                    self.preview_canvas.thumb_h = thumb_h
+    
             except Exception as e:
                 if self.preview_status:
                     self.preview_status.config(text=f"预览失败: {str(e)}")
@@ -2085,6 +2115,7 @@ class ImageConverter(TkinterDnD.Tk):
         scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
         self.task_listbox.bind("<Button-3>", self.show_context_menu)
         self.task_listbox.bind("<<ListboxSelect>>", self.on_task_select)
+        self.task_listbox.bind("<Double-Button-1>", self.on_double_click_edit)
 
         # 进度条
         progress_frame = ttk.Frame(left_frame)
@@ -2226,6 +2257,9 @@ class ImageConverter(TkinterDnD.Tk):
         self._add_image_paths(image_files)
 
     def _add_image_paths(self, paths):
+        if self.converting:
+            messagebox.showwarning("警告", "转换进行中，无法添加新任务")
+            return
         current = self.template_editor.get_settings()
         current.pop('preview_size', None)   # 安全删除
         current['name_template'] = self.name_template_var.get()
@@ -2238,7 +2272,14 @@ class ImageConverter(TkinterDnD.Tk):
             current['output_dir'] = os.path.normpath(global_dir)
         added = 0
         for fp in paths:
-            task = {'path': fp, **current}
+            # ========== 读取原始尺寸 ==========
+            try:
+                with Image.open(fp) as img:
+                    orig_w, orig_h = img.size
+            except Exception:
+                orig_w, orig_h = 0, 0
+            # ======================================
+            task = {'path': fp, **current, 'orig_w': orig_w, 'orig_h': orig_h}
             self.tasks.append(task)
             self.task_listbox.insert(tk.END, self.get_task_display_text(task))
             added += 1
@@ -2265,9 +2306,29 @@ class ImageConverter(TkinterDnD.Tk):
         first_task = self.tasks[first_idx]
         self.edit_task_dialog(first_idx, first_task, selected_indices=selection)
 
+    def on_double_click_edit(self, event=None):
+        """双击直接编辑任务"""
+        selection = self.task_listbox.curselection()
+        if not selection:
+            return
+        
+        # 如果已经选中多个，只编辑第一个（符合常规习惯）
+        idx = selection[0]
+        task = self.tasks[idx]
+        
+        # 可选：延迟一小会儿再打开，避免和预览抢占主线程
+        self.after(10, lambda: self.edit_task_dialog(idx, task, 
+                                                     selected_indices=selection if len(selection) > 1 else None))
+
+
     # ---------- 辅助函数 ----------
     def get_task_display_text(self, task):
         filename = os.path.basename(task['path'])
+        # ========== 新增：获取原始尺寸 ==========
+        w = task.get('orig_w', 0)
+        h = task.get('orig_h', 0)
+        size_str = f"[{w}x{h}]" if w and h else "[未知尺寸]"
+        # ======================================
         out_name = self.build_output_name(task['name_template'], task['path'])
         if task['format'] == "保持原格式":
             ext = os.path.splitext(task['path'])[1].lower()
@@ -2300,7 +2361,8 @@ class ImageConverter(TkinterDnD.Tk):
         param_str = f"[{task['format']} Q{task['quality']} {rot_display} {flip} {size}{crop_str}]"
         if task.get('delete_original', False):
             param_str = param_str[:-1] + " 删]"
-        return f"{filename} → {out_full} {param_str}"
+        # 修改返回字符串，将尺寸插入在文件名后
+        return f"{filename} {size_str} → {out_full} {param_str}"
 
     def select_output_dir(self):
         d = filedialog.askdirectory(initialdir=self.output_dir.get())
@@ -2630,7 +2692,7 @@ class ImageConverter(TkinterDnD.Tk):
                 else:
                     out_dir_display = os.path.normpath(out_dir_raw).replace('\\', '/')
                     out_dir_for_path = out_dir_display
-    
+        
                 name_template = name_var.get()
                 raw_out_name = self.build_output_name(name_template, src_path)
                 fmt = settings['format']
@@ -2638,12 +2700,12 @@ class ImageConverter(TkinterDnD.Tk):
                     ext = os.path.splitext(src_path)[1].lower()
                 else:
                     ext = self._get_output_extension(fmt)
-    
+        
                 if "{Original}" in name_template:
                     base_out_path = os.path.normpath(raw_out_name + ext).replace('\\', '/')
                 else:
                     base_out_path = os.path.normpath(os.path.join(out_dir_for_path, raw_out_name + ext)).replace('\\', '/')
-    
+        
                 dup_mode = dup_var.get()
                 final_path = base_out_path
                 if dup_mode == "自动重命名":
@@ -2652,8 +2714,13 @@ class ImageConverter(TkinterDnD.Tk):
                     final_path = base_out_path + " (如有冲突将询问)"
                 elif dup_mode == "跳过":
                     final_path = base_out_path + " (如有冲突则跳过)"
-    
+        
                 src_path_disp = src_path.replace('\\', '/')
+                # ========== 新增：获取原始尺寸 ==========
+                orig_w = task.get('orig_w', 0)
+                orig_h = task.get('orig_h', 0)
+                size_str = f" ({orig_w}x{orig_h})" if orig_w and orig_h else " (尺寸未知)"
+                # ======================================
                 rot = settings['rotation']
                 rot_map = {"0°": "无旋转", "90°": "左转90°", "-90°": "右转90°", "180°": "旋转180°"}
                 rot_display = rot_map.get(rot, rot)
@@ -2663,12 +2730,12 @@ class ImageConverter(TkinterDnD.Tk):
                 if settings['v_flip']:
                     flip_parts.append("垂直翻转")
                 flip_display = ", ".join(flip_parts) if flip_parts else "无翻转"
-    
+        
                 if fmt == "保持原格式":
                     format_quality = f"输出格式: 保持原格式 ({ext}) | 质量/压缩: (保持原参数)"
                 else:
                     format_quality = f"输出格式: {fmt} | 质量/压缩: {settings['quality']}"
-    
+        
                 resize_mode = settings['resize_mode']
                 if resize_mode == "无调整":
                     resize_info = "尺寸调整: 不调整"
@@ -2680,9 +2747,9 @@ class ImageConverter(TkinterDnD.Tk):
                     resize_info = f"尺寸调整: 限制短边 {settings['resize_w']}px"
                 else:
                     resize_info = f"尺寸调整: {resize_mode}"
-    
+        
                 line1 = f"{format_quality} | 旋转: {rot_display} | 翻转: {flip_display} | {resize_info}"
-    
+        
                 parts = []
                 if settings.get('crop_enabled', False):
                     parts.append(f"裁剪: x={settings['crop_x']} y={settings['crop_y']} w={settings['crop_w']} h={settings['crop_h']}")
@@ -2707,11 +2774,11 @@ class ImageConverter(TkinterDnD.Tk):
                     wm_text = settings.get('watermark_text', '')
                     parts.append(f"水印: '{wm_text}'")
                 line2 = " | ".join(parts) if parts else "无额外调整"
-    
+        
                 delete_warning = "⚠️ 转换后将删除原文件" if settings.get('delete_original', False) else ""
-    
+        
                 info_lines = [
-                    f"原文件: {src_path_disp}",
+                    f"原文件: {src_path_disp}{size_str}",   # 修改此行
                     f"输出目录: {out_dir_display}",
                     f"最终输出路径: {final_path}",
                     line1,
@@ -2719,7 +2786,7 @@ class ImageConverter(TkinterDnD.Tk):
                 ]
                 if delete_warning:
                     info_lines.append(delete_warning)
-    
+        
                 preview_text.config(state=tk.NORMAL)
                 preview_text.delete(1.0, tk.END)
                 preview_text.insert(tk.END, "\n".join(info_lines))
