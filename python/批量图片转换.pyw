@@ -1117,7 +1117,7 @@ class ImageConverter(TkinterDnD.Tk):
 
     def visual_crop_mode(self, task=None, on_finish=None):
         """
-        可视化裁剪模式（预览画布已带10px边距，提示居中）
+        可视化裁剪模式（预览画布已带10px边距，支持在已有裁剪基础上追加裁剪）
         """
         if task is None:
             task = self.current_preview_task
@@ -1348,6 +1348,10 @@ class ImageConverter(TkinterDnD.Tk):
         task_out_dir = task.get('output_dir')
         if task_out_dir and task_out_dir.strip():
             out_dir = task_out_dir.strip()
+        # 如果 out_dir 为 None 或空，使用原文件目录
+        if out_dir is None or out_dir == "":
+            out_dir = os.path.dirname(task['path'])
+        # 构建名称
         name_or_path = self.build_output_name(task['name_template'], task['path'])
         fmt = task['format']
         if fmt == "保持原格式":
@@ -1357,11 +1361,8 @@ class ImageConverter(TkinterDnD.Tk):
         if "{Original}" in task['name_template']:
             base_path = name_or_path + ext
         else:
-            if out_dir is None:
-                out_dir = os.path.dirname(task['path'])
             base_path = os.path.join(out_dir, name_or_path + ext)
-        dup_mode = task.get('duplicate_mode', self.duplicate_mode_var.get())
-        return self._get_unique_filename(base_path, dup_mode)
+        return base_path
 
     def _get_font(self, font_name, font_size):
         key = (font_name, font_size)
@@ -1942,64 +1943,116 @@ class ImageConverter(TkinterDnD.Tk):
             return 0
 
     def resolve_duplicate_paths(self, tasks, out_dir):
-        # 修改后使用 _build_output_path
-        resolved_items = []
-        duplicate_mode = self.duplicate_mode_var.get()
-        if duplicate_mode in ("覆盖", "自动重命名"):
-            for idx, task in enumerate(tasks):
-                task_copy = task.copy()
-                task_copy['out_path'] = None
-                resolved_items.append((task_copy, idx))
-            return resolved_items
-        if duplicate_mode == "跳过":
-            for idx, task in enumerate(tasks):
-                base_out = self._build_output_path(task, out_dir)
+        """
+        解析重复文件，返回 (待转换任务列表, 跳过的任务索引列表)
+        逻辑：
+        - 若任务自身设置了 duplicate_mode，则使用该模式。
+        - 若任务未设置，则使用全局模式。
+        - 所有 "询问" 模式统一处理，支持"全部应用"。
+        """
+        resolved = []
+        skipped = []
+        global_dup_mode = self.duplicate_mode_var.get()
+        conflicts = []  # 收集所有需要询问的任务 (idx, task, base_out)
+    
+        for idx, task in enumerate(tasks):
+            # 确定有效模式
+            task_dup_mode = task.get('duplicate_mode')
+            if task_dup_mode is None:
+                effective_mode = global_dup_mode
+            else:
+                effective_mode = task_dup_mode
+    
+            # 构建输出路径
+            task_out_dir = task.get('output_dir')
+            effective_out_dir = task_out_dir.strip() if task_out_dir and task_out_dir.strip() else out_dir
+            base_out = self._build_output_path(task, effective_out_dir)
+    
+            if effective_mode == "询问":
+                # 收集到统一冲突列表
+                conflicts.append((idx, task, base_out))
+                continue
+    
+            # 处理非询问模式
+            if effective_mode == "跳过":
                 if os.path.exists(base_out):
-                    continue
+                    skipped.append(idx)
+                else:
+                    task_copy = task.copy()
+                    task_copy['out_path'] = base_out
+                    resolved.append((task_copy, idx))
+            elif effective_mode == "覆盖":
                 task_copy = task.copy()
                 task_copy['out_path'] = base_out
-                resolved_items.append((task_copy, idx))
-            return resolved_items
-        if duplicate_mode == "询问":
-            conflicts = []
-            for idx, task in enumerate(tasks):
-                base_out = self._build_output_path(task, out_dir)
-                conflicts.append((task, base_out, idx))
-            apply_to_all = None
-            for task, original_path, original_idx in conflicts:
-                final_path = original_path
-                if os.path.exists(original_path):
-                    if apply_to_all is None:
-                        result = self._ask_duplicate_action(original_path)
-                        if result == "apply_overwrite":
-                            apply_to_all = "overwrite"
-                            final_path = original_path
-                        elif result == "apply_rename":
-                            apply_to_all = "rename"
-                            final_path = self._auto_rename_path(original_path)
-                        elif result == "apply_skip":
-                            apply_to_all = "skip"
-                            continue
-                        elif result == "overwrite":
-                            final_path = original_path
-                        elif result == "rename":
-                            final_path = self._auto_rename_path(original_path)
-                        elif result == "skip":
-                            continue
-                    else:
-                        if apply_to_all == "overwrite":
-                            final_path = original_path
-                        elif apply_to_all == "rename":
-                            final_path = self._auto_rename_path(original_path)
-                        elif apply_to_all == "skip":
-                            continue
-                else:
-                    final_path = original_path
+                resolved.append((task_copy, idx))
+            elif effective_mode == "自动重命名":
+                final_path = self._get_unique_filename(base_out, "自动重命名")
                 task_copy = task.copy()
                 task_copy['out_path'] = final_path
-                resolved_items.append((task_copy, original_idx))
-            return resolved_items
-        return resolved_items
+                resolved.append((task_copy, idx))
+            else:
+                # 未知模式，按自动重命名
+                final_path = self._get_unique_filename(base_out, "自动重命名")
+                task_copy = task.copy()
+                task_copy['out_path'] = final_path
+                resolved.append((task_copy, idx))
+    
+        # 统一处理所有询问任务
+        if conflicts:
+            apply_to_all = None
+            for idx, task, base_out in conflicts:
+                if os.path.exists(base_out):
+                    if apply_to_all is None:
+                        result = self._ask_duplicate_action(base_out)
+                        if result == "apply_overwrite":
+                            apply_to_all = "overwrite"
+                            task_copy = task.copy()
+                            task_copy['out_path'] = base_out
+                            resolved.append((task_copy, idx))
+                        elif result == "apply_rename":
+                            apply_to_all = "rename"
+                            final_path = self._auto_rename_path(base_out)
+                            task_copy = task.copy()
+                            task_copy['out_path'] = final_path
+                            resolved.append((task_copy, idx))
+                        elif result == "apply_skip":
+                            apply_to_all = "skip"
+                            skipped.append(idx)
+                        elif result == "overwrite":
+                            task_copy = task.copy()
+                            task_copy['out_path'] = base_out
+                            resolved.append((task_copy, idx))
+                        elif result == "rename":
+                            final_path = self._auto_rename_path(base_out)
+                            task_copy = task.copy()
+                            task_copy['out_path'] = final_path
+                            resolved.append((task_copy, idx))
+                        elif result == "skip":
+                            skipped.append(idx)
+                        else:
+                            # 默认覆盖
+                            task_copy = task.copy()
+                            task_copy['out_path'] = base_out
+                            resolved.append((task_copy, idx))
+                    else:
+                        if apply_to_all == "overwrite":
+                            task_copy = task.copy()
+                            task_copy['out_path'] = base_out
+                            resolved.append((task_copy, idx))
+                        elif apply_to_all == "rename":
+                            final_path = self._auto_rename_path(base_out)
+                            task_copy = task.copy()
+                            task_copy['out_path'] = final_path
+                            resolved.append((task_copy, idx))
+                        elif apply_to_all == "skip":
+                            skipped.append(idx)
+                else:
+                    # 文件不存在，直接添加
+                    task_copy = task.copy()
+                    task_copy['out_path'] = base_out
+                    resolved.append((task_copy, idx))
+    
+        return resolved, skipped
 
     def _ask_duplicate_action(self, path):
         dlg = Toplevel(self)
@@ -2993,6 +3046,18 @@ class ImageConverter(TkinterDnD.Tk):
         if not self.tasks:
             messagebox.showwarning("警告", "任务列表为空")
             return
+    
+        # ========== 清除所有旧状态标记 ==========
+        import re
+        for i in range(self.task_listbox.size()):
+            text = self.task_listbox.get(i)
+            # 移除末尾的状态标记（✓、✗ 错误信息、⏭跳过）
+            cleaned = re.sub(r'\s*(✓|✗\s+.*|⏭跳过)$', '', text)
+            self.task_listbox.delete(i)
+            self.task_listbox.insert(i, cleaned)
+            self.task_listbox.itemconfig(i, fg='black')
+        # ======================================
+    
         if len(self.tasks) > 50:
             if not messagebox.askyesno("确认", f"共有 {len(self.tasks)} 个任务，是否继续？"):
                 return
@@ -3051,21 +3116,13 @@ class ImageConverter(TkinterDnD.Tk):
             if not messagebox.askyesno("覆盖确认", msg, icon='warning'):
                 return
     
-        # ========== 原有逻辑继续 ==========
-        # 检查是否有任务开启了删除原文件（但不与覆盖同时存在的情况）
+        # ========== 检查删除原文件选项 ==========
         has_delete = any(task.get('delete_original', False) for task in self.tasks)
         if has_delete:
             delete_count = sum(1 for task in self.tasks if task.get('delete_original', False))
             msg = f"检测到 {delete_count} 个任务开启了“删除原文件”选项。\n\n删除操作会将原文件移至回收站/废纸篓，不可恢复！\n\n是否继续转换？"
             if not messagebox.askyesno("确认删除", msg, icon='warning'):
                 return
-    
-        # 自动修复：如果输出目录为空且覆盖，但之前已经处理过危险情况，这里不再重复
-        # 原有代码中有一段将覆盖改为自动重命名的逻辑，但那是针对 out_dir 不为 None 的情况。
-        # 现在 out_dir 可能为 None，需要保留该逻辑的增强版（可选，但我们已经用警告替代了自动修改，避免用户困惑）
-        # 为了安全，可以注释掉原有的自动修改，因为我们已经让用户确认了。
-        # 如果需要自动修复，可以保留但修改条件。
-        # 这里我们选择不自动修改，而是让用户决定。
     
         # 计算原始文件总大小
         self.total_input_size = 0
@@ -3074,12 +3131,28 @@ class ImageConverter(TkinterDnD.Tk):
                 self.total_input_size += os.path.getsize(task['path'])
         self.total_output_size = 0
     
-        # 获取 resolved_items
-        resolved_items = self.resolve_duplicate_paths(self.tasks, out_dir)
-        if not resolved_items:
-            messagebox.showinfo("提示", "所有任务均被跳过，没有需要转换的任务")
+        # 解析重复文件，获取待转换任务和跳过的任务索引
+        resolved_items, skipped_indices = self.resolve_duplicate_paths(self.tasks, out_dir)
+        
+        # 标记跳过的任务
+        for idx in skipped_indices:
+            self.task_listbox.itemconfig(idx, fg='gray')
+            current_text = self.task_listbox.get(idx)
+            if "⏭跳过" not in current_text:
+                self.task_listbox.delete(idx)
+                self.task_listbox.insert(idx, current_text + " ⏭跳过")
+        
+        if skipped_indices:
+            messagebox.showinfo("跳过提示", f"共有 {len(skipped_indices)} 个任务因输出文件已存在而被跳过。")
+        
+        if not resolved_items and not skipped_indices:
+            messagebox.showinfo("提示", "没有需要转换的任务，且没有任务被跳过。\n请检查任务的重名处理模式设置。")
+            return
+        elif not resolved_items:
+            self.progress_label.config(text="所有任务已跳过")
             return
     
+        # 开始转换
         self.start_btn.config(state=tk.DISABLED)
         self.converting = True
         self.cancel_convert = False
